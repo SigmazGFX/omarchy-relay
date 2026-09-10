@@ -4,6 +4,15 @@ set -euo pipefail
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-relay"
 BIN_DIR="$HOME/.local/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-relay"
+UNIT_FILE="$HOME/.config/systemd/user/omarchy-relay-daemon.service"
+
+if systemctl --user is-enabled omarchy-relay-daemon >/dev/null 2>&1 \
+   || systemctl --user is-active omarchy-relay-daemon >/dev/null 2>&1; then
+  systemctl --user disable --now omarchy-relay-daemon >/dev/null 2>&1 || true
+  echo "Stopped and disabled omarchy-relay-daemon"
+fi
+rm -f "$UNIT_FILE"
+systemctl --user daemon-reload 2>/dev/null || true
 
 rm -rf "$INSTALL_DIR"
 rm -f "$BIN_DIR/omarchy-relay"
