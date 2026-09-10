@@ -21,6 +21,19 @@ rm -f "$DESKTOP_FILE"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
 echo "Removed $INSTALL_DIR, $BIN_DIR/omarchy-relay, and the app launcher entry"
 
+SHELL_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+if [[ -f "$SHELL_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+  if jq -e '[.bar.layout.left[]?, .bar.layout.center[]?, .bar.layout.right[]?] | any(.id == "omarchy-relay")' "$SHELL_CONFIG" >/dev/null 2>&1; then
+    cp "$SHELL_CONFIG" "$SHELL_CONFIG.bak.$(date +%s)"
+    jq '
+      .bar.layout.left   = ((.bar.layout.left   // []) | map(select(.id != "omarchy-relay")))
+      | .bar.layout.center = ((.bar.layout.center // []) | map(select(.id != "omarchy-relay")))
+      | .bar.layout.right  = ((.bar.layout.right  // []) | map(select(.id != "omarchy-relay")))
+    ' "$SHELL_CONFIG" > "$SHELL_CONFIG.tmp" && mv "$SHELL_CONFIG.tmp" "$SHELL_CONFIG"
+    echo "Removed the Omarchy Relay bar icon from $SHELL_CONFIG"
+  fi
+fi
+
 if [ -d "$CONFIG_DIR" ]; then
   read -r -p "Also delete config (contains your network passphrase) at $CONFIG_DIR? [y/N] " reply
   if [[ "$reply" =~ ^[Yy]$ ]]; then
