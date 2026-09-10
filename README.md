@@ -6,6 +6,21 @@ a shared MQTT broker, so any device that can reach the broker (home, laptop,
 VPS, behind NAT, wherever) can talk to any other device in the same
 "network."
 
+## Quickstart (one command, no manual broker setup)
+
+```sh
+git clone https://github.com/SigmazGFX/omarchy-relay ~/Projects/omarchy-relay
+cd ~/Projects/omarchy-relay
+./scripts/quickstart.sh
+```
+
+Installs everything, self-hosts a Mosquitto broker on this machine with
+generated credentials, opens the firewall port for it, configures
+omarchy-relay, and starts it as a background service — the only manual step
+is your `sudo` password. It prints the network name/passphrase/broker
+details at the end so you can add other machines to the same network. See
+[Install](#install) below for the manual/customizable path instead.
+
 ## How it works
 
 - Every device connects outbound to one MQTT broker (yours — see `docker/`
