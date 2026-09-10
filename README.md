@@ -179,6 +179,47 @@ journalctl --user -fu omarchy-relay-daemon   # watch chat/file activity
 Useful on a headless machine, or any device you want reachable for file
 transfers without keeping a chat window open.
 
+## Remote actions
+
+A peer can ask another machine to run a **named** action over the relay —
+e.g. checking status, restarting a service, triggering a script that's
+already there. **Off by default.** Currently serviced by `chat` and
+`daemon` (not yet by `gui`/`chat --tui`).
+
+**The security model, in one sentence: the receiving machine's own config
+always decides what runs on it — a sender can pick a name, never supply
+code.** Concretely:
+
+- Each machine keeps a **named-command table** in its own config: a name
+  (`status`) mapped to a fixed shell string (`systemctl status foo`) that
+  *you* wrote. A remote request can only reference a name — the string
+  that actually executes is never derived from anything the sender sent.
+- Each machine also keeps a **per-peer trust table**, keyed by device id:
+  `"none"` (the default for every peer you haven't listed) or
+  `"commands"` (may trigger a name from your table). There's no
+  "everyone in the network" fallback — an unlisted peer is always denied.
+- The whole feature has a **global off switch**
+  (`remote_actions.enabled`), separate from the per-peer table, so it's a
+  deliberate two-step opt-in: turn it on, *and* trust specific peers.
+- Requests are deduplicated by id, so an MQTT redelivery can't cause a
+  command to run twice.
+
+```sh
+omarchy-relay trust enable                        # turn the feature on for this machine
+omarchy-relay commands set status "systemctl status omarchy-relay-daemon --no-pager"
+omarchy-relay trust set <their-device-id> commands # find device ids via: omarchy-relay peers
+omarchy-relay trust list                           # review what's granted
+omarchy-relay trust set <their-device-id> none      # revoke
+
+omarchy-relay action <their-nickname> status        # from the other machine: run it, print the result
+```
+
+Inside `chat`: `/action <nick> <name>`.
+
+Output is captured and returned (stdout/stderr, capped at 8KB each, plus
+the exit code) — there's no arbitrary-command tier, by design, so there's
+nothing here equivalent to a remote shell.
+
 ## Security model
 
 - **What's protected:** message and file *content* is encrypted end-to-end
@@ -214,7 +255,7 @@ transfers without keeping a chat window open.
 
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
-                    presence, chat, cli, tui, gui)
+                    presence, remote_actions, chat, cli, tui, gui)
 install.sh          installs deps (pacman) + the omarchy-relay launcher
 uninstall.sh
 scripts/            one-shot quickstart installers (see Quickstart above)

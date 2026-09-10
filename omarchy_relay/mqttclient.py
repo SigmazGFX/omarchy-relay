@@ -17,6 +17,53 @@ from .config import Config
 from .crypto import Cipher, InvalidToken, topic_namespace
 
 
+class PendingActions:
+    """Matches outgoing remote-action requests to their results by request_id.
+
+    Also doubles as replay protection on the receiving side: a request_id
+    seen before (e.g. an MQTT QoS-1 redelivery of the same request) is
+    tracked separately by the caller via `seen()`.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[str, threading.Event] = {}
+        self._results: dict[str, dict] = {}
+        self._seen_requests: set[str] = set()
+
+    def register(self, request_id: str) -> threading.Event:
+        event = threading.Event()
+        with self._lock:
+            self._events[request_id] = event
+        return event
+
+    def resolve(self, obj: dict) -> None:
+        request_id = obj.get("request_id")
+        if not request_id:
+            return
+        with self._lock:
+            event = self._events.get(request_id)
+            if event is None:
+                return
+            self._results[request_id] = obj
+            event.set()
+
+    def pop_result(self, request_id: str) -> Optional[dict]:
+        with self._lock:
+            self._events.pop(request_id, None)
+            return self._results.pop(request_id, None)
+
+    def seen(self, request_id: str) -> bool:
+        """True if this request_id was already handled; marks it seen either way."""
+        with self._lock:
+            if request_id in self._seen_requests:
+                return True
+            self._seen_requests.add(request_id)
+            if len(self._seen_requests) > 1000:
+                self._seen_requests = set(list(self._seen_requests)[-500:])
+            return False
+
+
 class RelayClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -40,7 +87,11 @@ class RelayClient:
         self.on_presence: Optional[Callable[[str, Optional[dict]], None]] = None
         self.on_file_meta: Optional[Callable[[dict], None]] = None
         self.on_file_chunk: Optional[Callable[[dict], None]] = None
+        self.on_action_request: Optional[Callable[[dict], None]] = None
         self.on_bad_message: Optional[Callable[[str, Exception], None]] = None
+
+        # Remote-action request/result matching (see remote_actions.py).
+        self.pending_actions = PendingActions()
 
         self.connected = threading.Event()
 
@@ -75,6 +126,12 @@ class RelayClient:
     def send_file_chunk(self, transfer_id: str, obj: dict) -> None:
         self._publish_encrypted(f"{self.ns}/file/{transfer_id}/chunk", obj)
 
+    def send_action_request(self, target_device_id: str, obj: dict) -> None:
+        self._publish_encrypted(f"{self.ns}/action/{target_device_id}", obj)
+
+    def send_action_result(self, target_device_id: str, obj: dict) -> None:
+        self._publish_encrypted(f"{self.ns}/action-result/{target_device_id}", obj)
+
     def _publish_encrypted(self, topic: str, obj: dict, qos: int = 1, retain: bool = False) -> None:
         token = self.cipher.encrypt(json.dumps(obj).encode("utf-8"))
         self._client.publish(topic, payload=token, qos=qos, retain=retain)
@@ -91,6 +148,8 @@ class RelayClient:
                 (f"{self.ns}/presence/+", 1),
                 (f"{self.ns}/file/+/meta", 1),
                 (f"{self.ns}/file/+/chunk", 1),
+                (f"{self.ns}/action/{self.cfg.device_id}", 1),
+                (f"{self.ns}/action-result/{self.cfg.device_id}", 1),
             ]
         )
         self._publish_presence()
@@ -117,6 +176,10 @@ class RelayClient:
                 self._dispatch_encrypted(msg.payload, self.on_file_meta)
             elif len(parts) >= 2 and parts[-1] == "chunk" and "file" in parts:
                 self._dispatch_encrypted(msg.payload, self.on_file_chunk)
+            elif topic == f"{self.ns}/action/{self.cfg.device_id}":
+                self._dispatch_encrypted(msg.payload, self.on_action_request)
+            elif topic == f"{self.ns}/action-result/{self.cfg.device_id}":
+                self._dispatch_encrypted(msg.payload, self.pending_actions.resolve)
         except (InvalidToken, ValueError, KeyError) as exc:
             # Wrong passphrase, foreign traffic sharing the broker, or a
             # malformed message — drop it rather than crash the listener.

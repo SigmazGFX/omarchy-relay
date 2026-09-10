@@ -29,6 +29,12 @@ class Config:
     chunk_size: int = 65536
     max_file_size: int = 26_214_400
     downloads_dir: str = str(Path.home() / "Downloads" / "omarchy-relay")
+    # Remote-triggered actions, off by default. A peer can only ever
+    # trigger a name from this machine's own fixed-string command table
+    # below — never send text that gets run. See remote_actions.py.
+    remote_actions_enabled: bool = False
+    remote_actions_peers: dict = dataclasses.field(default_factory=dict)  # device_id -> "none"|"commands"
+    remote_actions_commands: dict = dataclasses.field(default_factory=dict)  # name -> fixed shell string
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
@@ -40,6 +46,7 @@ class Config:
         network = data.get("network", {})
         broker = data.get("broker", {})
         transfer = data.get("transfer", {})
+        remote_actions = data.get("remote_actions", {})
         cfg = cls(
             nickname=identity.get("nickname") or socket.gethostname(),
             device_id=identity.get("device_id") or default_device_id(),
@@ -53,6 +60,9 @@ class Config:
             chunk_size=transfer.get("chunk_size", 65536),
             max_file_size=transfer.get("max_file_size", 26_214_400),
             downloads_dir=transfer.get("downloads_dir", str(Path.home() / "Downloads" / "omarchy-relay")),
+            remote_actions_enabled=remote_actions.get("enabled", False),
+            remote_actions_peers=dict(remote_actions.get("peers", {})),
+            remote_actions_commands=dict(remote_actions.get("commands", {})),
         )
         if not cfg.broker_host:
             raise ValueError(
@@ -94,6 +104,15 @@ password = {s(self.broker_password)}
 chunk_size = {self.chunk_size}
 max_file_size = {self.max_file_size}
 downloads_dir = {s(self.downloads_dir)}
+
+[remote_actions]
+enabled = {"true" if self.remote_actions_enabled else "false"}
+
+[remote_actions.peers]
+{_toml_table(self.remote_actions_peers)}
+
+[remote_actions.commands]
+{_toml_table(self.remote_actions_commands)}
 """
 
 
@@ -105,3 +124,7 @@ def _toml_str(value: str) -> str:
         .replace("\t", "\\t")
     )
     return f'"{escaped}"'
+
+
+def _toml_table(table: dict) -> str:
+    return "\n".join(f"{_toml_str(str(k))} = {_toml_str(str(v))}" for k, v in table.items())

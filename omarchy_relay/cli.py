@@ -10,6 +10,7 @@ from . import config as configmod
 from .chat import run_chat, run_daemon
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
+from .remote_actions import run_action
 from .transfer import send_file
 
 
@@ -176,6 +177,101 @@ def cmd_msg(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_action(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    client = RelayClient(cfg)
+    peers = PeerDirectory()
+    client.on_presence = lambda device_id, data: peers.update(device_id, data)
+    client.connect()
+    try:
+        time.sleep(1.5)
+        target = peers.resolve(args.peer)
+        if not target:
+            print(f"error: no such peer online: {args.peer}", file=sys.stderr)
+            return 1
+        try:
+            result = run_action(client, cfg, target, args.name, timeout=args.timeout)
+        except TimeoutError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if result.get("ok"):
+            if result.get("stdout"):
+                print(result["stdout"], end="" if result["stdout"].endswith("\n") else "\n")
+            if result.get("stderr"):
+                print(result["stderr"], end="" if result["stderr"].endswith("\n") else "\n", file=sys.stderr)
+            return result.get("exit_code", 0)
+        print(f"error: {result.get('error', 'unknown error')}", file=sys.stderr)
+        return 1
+    finally:
+        client.disconnect()
+
+
+def cmd_trust_list(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    print(f"remote actions: {'enabled' if cfg.remote_actions_enabled else 'disabled'}")
+    if not cfg.remote_actions_peers:
+        print("(no peers configured — everyone defaults to 'none', i.e. denied)")
+    else:
+        for device_id, level in sorted(cfg.remote_actions_peers.items()):
+            print(f"  {device_id}\t{level}")
+    return 0
+
+
+def cmd_trust_enable(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.remote_actions_enabled = True
+    cfg.save()
+    print("remote actions enabled for this machine (peers still need individual trust via: omarchy-relay trust set)")
+    return 0
+
+
+def cmd_trust_disable(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.remote_actions_enabled = False
+    cfg.save()
+    print("remote actions disabled for this machine")
+    return 0
+
+
+def cmd_trust_set(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    if args.level == "none":
+        cfg.remote_actions_peers.pop(args.device_id, None)
+    else:
+        cfg.remote_actions_peers[args.device_id] = args.level
+    cfg.save()
+    print(f"{args.device_id} -> {args.level}")
+    return 0
+
+
+def cmd_commands_list(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    if not cfg.remote_actions_commands:
+        print("(no named actions configured)")
+    else:
+        for name, shell_cmd in sorted(cfg.remote_actions_commands.items()):
+            print(f"  {name}\t{shell_cmd}")
+    return 0
+
+
+def cmd_commands_set(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.remote_actions_commands[args.name] = args.shell_command
+    cfg.save()
+    print(f"'{args.name}' -> {args.shell_command}")
+    return 0
+
+
+def cmd_commands_remove(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    if cfg.remote_actions_commands.pop(args.name, None) is None:
+        print(f"no such action: {args.name}", file=sys.stderr)
+        return 1
+    cfg.save()
+    print(f"removed '{args.name}'")
+    return 0
+
+
 def cmd_peers(args: argparse.Namespace) -> int:
     cfg = _load_config()
     client = RelayClient(cfg)
@@ -232,6 +328,52 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("peers", help="list who's currently online")
     p.add_argument("--wait", type=float, default=1.5, help="seconds to wait for presence to arrive (default 1.5)")
     p.set_defaults(func=cmd_peers)
+
+    p = sub.add_parser("action", help="ask a peer to run a named remote action and print the result")
+    p.add_argument("peer", help="nickname or device id of the peer to ask")
+    p.add_argument("name", help="the action name (must exist in that peer's OWN remote_actions.commands)")
+    p.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for a response (default 30)")
+    p.set_defaults(func=cmd_action)
+
+    trust_parser = sub.add_parser(
+        "trust", help="manage who may trigger remote actions on THIS machine (off by default)"
+    )
+    trust_sub = trust_parser.add_subparsers(dest="trust_command", required=True)
+
+    p = trust_sub.add_parser("list", help="show current trust settings")
+    p.set_defaults(func=cmd_trust_list)
+
+    p = trust_sub.add_parser("enable", help="turn on remote actions for this machine")
+    p.set_defaults(func=cmd_trust_enable)
+
+    p = trust_sub.add_parser("disable", help="turn off remote actions for this machine")
+    p.set_defaults(func=cmd_trust_disable)
+
+    p = trust_sub.add_parser("set", help="grant or revoke a specific device's trust level")
+    p.add_argument("device_id", help="the peer's device id (see: omarchy-relay peers)")
+    p.add_argument(
+        "level",
+        choices=["none", "commands"],
+        help="'none' revokes access, 'commands' allows triggering this machine's named actions",
+    )
+    p.set_defaults(func=cmd_trust_set)
+
+    commands_parser = sub.add_parser(
+        "commands", help="manage the named actions THIS machine will run when a trusted peer triggers them"
+    )
+    commands_sub = commands_parser.add_subparsers(dest="commands_command", required=True)
+
+    p = commands_sub.add_parser("list", help="show configured named actions")
+    p.set_defaults(func=cmd_commands_list)
+
+    p = commands_sub.add_parser("set", help="add or update a named action")
+    p.add_argument("name", help="the name peers will refer to")
+    p.add_argument("shell_command", help="the fixed shell command run locally when triggered — never sender-supplied")
+    p.set_defaults(func=cmd_commands_set)
+
+    p = commands_sub.add_parser("remove", help="delete a named action")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_commands_remove)
 
     return parser
 

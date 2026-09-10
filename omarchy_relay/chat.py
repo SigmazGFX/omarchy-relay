@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
+from .remote_actions import RemoteActionHandler, run_action
 from .transfer import FileReceiver, send_file
 
 _HELP = """\
@@ -17,6 +18,7 @@ Commands:
   /peers                 list who's online
   /msg <nick> <text>     send a direct message
   /send <path> [nick]    send a file (broadcast, or DM if nick given)
+  /action <nick> <name>  run a named remote action on that peer (if they've granted you access)
   /help                  show this help
   /quit                  leave
 Anything else is sent as a broadcast chat message.\
@@ -60,9 +62,15 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
         elif previous is None:
             print_line(f"* {data['nick']} is online")
 
+    def on_action_handled(request_obj, outcome):
+        print_line(f"* remote action '{request_obj.get('action', '?')}' from {request_obj.get('nick', '?')}: {outcome}")
+
+    action_handler = RemoteActionHandler(cfg, on_handled=on_action_handled)
+
     client.on_chat = on_chat
     client.on_dm = on_dm
     client.on_presence = on_presence
+    client.on_action_request = lambda obj: action_handler.handle_request(client, obj)
     return client
 
 
@@ -139,6 +147,30 @@ def run_chat(cfg: Config) -> None:
                     print(f"* sending '{path.name}' ({total_chunks} chunks, transfer {transfer_id})")
                 except (FileNotFoundError, ValueError) as exc:
                     print(f"! {exc}")
+            elif line.startswith("/action "):
+                rest = line[len("/action ") :]
+                if " " not in rest:
+                    print("usage: /action <nick> <name>")
+                    continue
+                nick, name = rest.split(" ", 1)
+                target = peers.resolve(nick)
+                if not target:
+                    print(f"no such peer online: {nick}")
+                    continue
+                print(f"* asking {nick} to run '{name}' ...")
+                try:
+                    result = run_action(client, cfg, target, name)
+                except TimeoutError as exc:
+                    print(f"! {exc}")
+                    continue
+                if result.get("ok"):
+                    print(f"* exit code {result['exit_code']}")
+                    if result.get("stdout"):
+                        print(result["stdout"].rstrip("\n"))
+                    if result.get("stderr"):
+                        print(f"[stderr] {result['stderr'].rstrip(chr(10))}")
+                else:
+                    print(f"! {result.get('error', 'unknown error')}")
             elif line.startswith("/"):
                 print(f"unknown command: {line}  (try /help)")
             else:
