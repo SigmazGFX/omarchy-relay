@@ -30,6 +30,7 @@ def _fmt_ts(ts: float) -> str:
 def _notify(summary: str, body: str) -> None:
     if shutil.which("notify-send"):
         try:
+            body = body if len(body) <= 200 else body[:197] + "..."
             subprocess.run(["notify-send", "omarchy-relay", f"{summary}: {body}"], check=False, timeout=2)
         except Exception:
             pass
@@ -40,9 +41,14 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
 
     def on_chat(obj):
         print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {obj['text']}")
+        # Broadcasts echo back to the sender too (we're subscribed to our own
+        # publish topic) — don't pop a notification for our own messages.
+        if obj.get("from") != cfg.device_id:
+            _notify(obj["nick"], obj["text"])
 
     def on_dm(obj):
         print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {obj['text']}")
+        _notify(f"DM from {obj['nick']}", obj["text"])
 
     def on_presence(device_id, data):
         changed, previous = peers.update(device_id, data)

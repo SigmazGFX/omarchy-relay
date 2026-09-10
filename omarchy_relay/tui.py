@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Log, Static
 
+from .chat import _notify
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
@@ -88,9 +89,14 @@ class RelayApp(App):
 
     def _handle_chat(self, obj: dict) -> None:
         self._log(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {obj['text']}")
+        # Broadcasts echo back to the sender too (we're subscribed to our own
+        # publish topic) — don't pop a notification for our own messages.
+        if obj.get("from") != self.cfg.device_id:
+            _notify(obj["nick"], obj["text"])
 
     def _handle_dm(self, obj: dict) -> None:
         self._log(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {obj['text']}")
+        _notify(f"DM from {obj['nick']}", obj["text"])
 
     def _handle_presence(self, device_id: str, data) -> None:
         changed, previous = self.peers.update(device_id, data)
@@ -111,6 +117,7 @@ class RelayApp(App):
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
         self.call_from_thread(self._log, f"* received '{meta['filename']}' from {meta['nick']} -> {path}")
+        _notify("File received", f"{meta['filename']} from {meta['nick']}")
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
         self.call_from_thread(self._log, f"* file '{meta.get('filename', '?')}' failed: {msg}")
