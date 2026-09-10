@@ -156,8 +156,12 @@ omarchy-relay daemon             # headless: prints chat, auto-saves incoming fi
 peer sidebar with online status, a message log, a file-attach button, and
 a Settings screen (gear icon) for editing nickname/network
 name/passphrase/broker host/port/TLS/credentials without touching the
-config file by hand — saving reconnects using the new settings
-immediately.
+config file by hand. Settings also has a "Show online/offline messages"
+switch if you'd rather the chat log stayed quiet about peers connecting
+and disconnecting — the sidebar still stays accurate either way, this
+only mutes the log lines. Changing network/broker fields reconnects
+immediately; toggling the presence switch doesn't (no need to bounce the
+connection for a display preference).
 
 Inside `chat`: `/peers`, `/msg <nick> <text>`, `/send <path> [nick]`,
 `/help`, `/quit`.

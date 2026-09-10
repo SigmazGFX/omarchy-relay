@@ -35,6 +35,9 @@ class Config:
     remote_actions_enabled: bool = False
     remote_actions_peers: dict = dataclasses.field(default_factory=dict)  # device_id -> "none"|"commands"
     remote_actions_commands: dict = dataclasses.field(default_factory=dict)  # name -> fixed shell string
+    # Display preference: show "X is online"/"X went offline" lines in the
+    # chat log. Peer list/sidebar accuracy is unaffected either way.
+    show_presence: bool = True
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
@@ -47,6 +50,7 @@ class Config:
         broker = data.get("broker", {})
         transfer = data.get("transfer", {})
         remote_actions = data.get("remote_actions", {})
+        ui = data.get("ui", {})
         cfg = cls(
             nickname=identity.get("nickname") or socket.gethostname(),
             device_id=identity.get("device_id") or default_device_id(),
@@ -63,6 +67,7 @@ class Config:
             remote_actions_enabled=remote_actions.get("enabled", False),
             remote_actions_peers=dict(remote_actions.get("peers", {})),
             remote_actions_commands=dict(remote_actions.get("commands", {})),
+            show_presence=ui.get("show_presence", True),
         )
         if not cfg.broker_host:
             raise ValueError(
@@ -113,6 +118,9 @@ enabled = {"true" if self.remote_actions_enabled else "false"}
 
 [remote_actions.commands]
 {_toml_table(self.remote_actions_commands)}
+
+[ui]
+show_presence = {"true" if self.show_presence else "false"}
 """
 
 

@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import gi
 
@@ -211,11 +212,12 @@ class RelayWindow(Adw.ApplicationWindow):
         changed, previous = self.peers.update(device_id, data)
         if not changed:
             return
-        if data is None:
-            name = previous.get("nick", device_id) if previous else device_id
-            self._append_system(f"{name} went offline")
-        elif previous is None:
-            self._append_system(f"{data['nick']} is online")
+        if self.cfg.show_presence:
+            if data is None:
+                name = previous.get("nick", device_id) if previous else device_id
+                self._append_system(f"{name} went offline")
+            elif previous is None:
+                self._append_system(f"{data['nick']} is online")
         self._refresh_peer_list()
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
@@ -309,8 +311,32 @@ class RelayWindow(Adw.ApplicationWindow):
             broker_group.add(row)
         page.add(broker_group)
 
+        chat_group = Adw.PreferencesGroup(title="Chat")
+        presence_row = Adw.SwitchRow(
+            title="Show online/offline messages",
+            subtitle="Peer list stays accurate either way — this only mutes the log lines",
+        )
+        presence_row.set_active(self.cfg.show_presence)
+        chat_group.add(presence_row)
+        page.add(chat_group)
+
         toolbar_view.set_content(page)
         win.set_content(toolbar_view)
+
+        # Fields that require tearing down and reconnecting RelayClient —
+        # toggling a display-only preference like show_presence shouldn't
+        # pay that cost (and would itself cause a spurious offline/online
+        # flicker, which is exactly what this switch is meant to reduce).
+        _RECONNECT_FIELDS = (
+            "nickname",
+            "network_name",
+            "passphrase",
+            "broker_host",
+            "broker_port",
+            "broker_tls",
+            "broker_username",
+            "broker_password",
+        )
 
         def on_save(_btn) -> None:
             new_cfg = dataclasses.replace(
@@ -323,13 +349,22 @@ class RelayWindow(Adw.ApplicationWindow):
                 broker_tls=tls_row.get_active(),
                 broker_username=username_row.get_text().strip(),
                 broker_password=password_row.get_text(),
+                show_presence=presence_row.get_active(),
             )
             if not new_cfg.broker_host or not new_cfg.network_name or not new_cfg.passphrase:
                 self.toast_overlay.add_toast(Adw.Toast(title="Host, network name, and passphrase are required"))
                 return
             new_cfg.save()
             win.close()
-            self._apply_new_config(new_cfg)
+            needs_reconnect = any(
+                getattr(new_cfg, field) != getattr(self.cfg, field) for field in _RECONNECT_FIELDS
+            )
+            if needs_reconnect:
+                self._apply_new_config(new_cfg)
+            else:
+                self.cfg = new_cfg
+                self.receiver.cfg = new_cfg
+                self.toast_overlay.add_toast(Adw.Toast(title="Settings saved"))
 
         save_btn.connect("clicked", on_save)
         win.present()
@@ -356,11 +391,21 @@ class RelayApp(Adw.Application):
     def __init__(self, cfg: Config):
         super().__init__(application_id="net.omarchy.Relay")
         self.cfg = cfg
+        self.window: Optional[RelayWindow] = None
         self.connect("activate", self._on_activate)
 
     def _on_activate(self, app: "RelayApp") -> None:
-        win = RelayWindow(app, self.cfg)
-        win.present()
+        # GTK/GIO single-instance apps re-fire "activate" on the SAME
+        # running process for every subsequent launch (app launcher click,
+        # `omarchy-relay gui` run again, etc.) — without this guard each
+        # one created a brand new window *and* a brand new RelayClient
+        # sharing the same device_id, which just fight over the same MQTT
+        # client identity. Re-present the existing window instead.
+        if self.window is not None:
+            self.window.present()
+            return
+        self.window = RelayWindow(app, self.cfg)
+        self.window.present()
 
 
 def run_gui(cfg: Config) -> None:
