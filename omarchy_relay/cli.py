@@ -31,18 +31,30 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 1
 
     print(
-        "\nBroker: point this at an MQTT broker you control (see docker/ in the repo "
-        "for a self-hosted Mosquitto setup), or a managed provider.\n"
-        "This will NOT default to a public broker.\n"
+        "\nBroker — where this network's traffic relays through:\n"
+        "  1) A broker you control (self-hosted, or a managed provider) — recommended\n"
+        "  2) HiveMQ's free public test broker — zero setup, but it's shared with the\n"
+        "     whole internet: no auth, no uptime/persistence guarantee. Your content is\n"
+        "     still encrypted with your passphrase, but don't rely on this for anything\n"
+        "     you care about.\n"
     )
-    broker_host = input("Broker host: ").strip()
-    if not broker_host:
-        print("Broker host is required.")
-        return 1
-    broker_port_raw = input("Broker port [8883]: ").strip() or "8883"
-    broker_tls_raw = input("Use TLS? [Y/n]: ").strip().lower() or "y"
-    broker_username = input("Broker username (blank if none): ").strip()
-    broker_password = getpass.getpass("Broker password (blank if none): ").strip() if broker_username else ""
+    broker_choice = input("Choice [1]: ").strip() or "1"
+    if broker_choice == "2":
+        broker_host = "broker.hivemq.com"
+        broker_port = 8883
+        broker_tls = True
+        broker_username = ""
+        broker_password = ""
+        print(f"Using HiveMQ's public test broker at {broker_host}:{broker_port} (TLS).")
+    else:
+        broker_host = input("Broker host: ").strip()
+        if not broker_host:
+            print("Broker host is required.")
+            return 1
+        broker_port = int(input("Broker port [8883]: ").strip() or "8883")
+        broker_tls = (input("Use TLS? [Y/n]: ").strip().lower() or "y") not in ("n", "no")
+        broker_username = input("Broker username (blank if none): ").strip()
+        broker_password = getpass.getpass("Broker password (blank if none): ").strip() if broker_username else ""
 
     cfg = configmod.Config(
         nickname=nickname,
@@ -50,8 +62,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         network_name=network_name,
         passphrase=passphrase,
         broker_host=broker_host,
-        broker_port=int(broker_port_raw),
-        broker_tls=broker_tls_raw not in ("n", "no"),
+        broker_port=broker_port,
+        broker_tls=broker_tls,
         broker_username=broker_username,
         broker_password=broker_password,
     )

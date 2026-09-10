@@ -8,17 +8,35 @@ VPS, behind NAT, wherever) can talk to any other device in the same
 
 ## Quickstart (one command, no manual broker setup)
 
+Two flavors, depending on how much you trust the network:
+
 ```sh
 git clone https://github.com/SigmazGFX/omarchy-relay ~/Projects/omarchy-relay
 cd ~/Projects/omarchy-relay
-./scripts/quickstart.sh
+
+./scripts/quickstart.sh            # self-hosted: installs + runs your own broker
+# or
+./scripts/quickstart-hivemq.sh     # zero infra: rides HiveMQ's free public broker
 ```
 
-Installs everything, self-hosts a Mosquitto broker on this machine with
-generated credentials, opens the firewall port for it, configures
-omarchy-relay, and starts it as a background service — the only manual step
-is your `sudo` password. It prints the network name/passphrase/broker
-details at the end so you can add other machines to the same network. See
+Both install everything, configure omarchy-relay, and start it as a
+background service — the only manual step either way is your `sudo`
+password (needed to install three packages from the Arch repos).
+
+- **`quickstart.sh`** additionally self-hosts a Mosquitto broker on this
+  machine with generated credentials and opens the firewall port for it.
+  Recommended default — it's your broker, nobody else's.
+- **`quickstart-hivemq.sh`** skips all of that and points at
+  `broker.hivemq.com` instead — no broker to run, no port to open. It's
+  free and requires no signup, but it's a public, unauthenticated broker
+  shared with the whole internet: your message/file *content* is still
+  encrypted (see [Security model](#security-model)), but there's no
+  privacy guarantee for metadata and no uptime promise. Fine for trying
+  this out or casual use; not for anything you'd mind losing or having
+  timing/size metadata seen.
+
+Either way, the script prints the network name/passphrase/broker details
+at the end so you can add other machines to the same network. See
 [Install](#install) below for the manual/customizable path instead.
 
 ## How it works
@@ -67,9 +85,23 @@ textual`, and run `python3 -m omarchy_relay.cli` from inside the repo.
 You need an MQTT broker every device in your network can reach. There is
 **no built-in default** — `omarchy-relay` refuses to start without
 `broker.host` set, deliberately, so nobody accidentally broadcasts onto a
-public test broker. See [`docker/README.md`](docker/README.md) for a
-self-hosted Mosquitto setup with three options for making it reachable
-(private overlay network, TLS, or a managed provider).
+public broker without choosing to.
+
+Options, roughly in order of "more private" to "less setup":
+
+1. **Self-hosted Mosquitto** — `scripts/quickstart.sh`, or manually via
+   [`docker/README.md`](docker/README.md), which also covers making it
+   reachable from off-box (private overlay network, TLS, or a managed
+   provider).
+2. **HiveMQ Cloud (free tier)** — a *private* managed broker, TLS and
+   credentials included, no infrastructure to run yourself. Sign up at
+   [hivemq.com/mqtt-cloud-broker](https://www.hivemq.com/mqtt-cloud-broker/),
+   create a free cluster, and use the host/port/username/password it gives
+   you in `omarchy-relay init` (broker option 1) with `tls = true`.
+3. **HiveMQ's public test broker** — `scripts/quickstart-hivemq.sh`, or
+   `omarchy-relay init` broker option 2. Zero setup, zero signup, but
+   public and unauthenticated — see the quickstart section above for the
+   tradeoffs.
 
 ## Configure
 
