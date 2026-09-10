@@ -3,10 +3,11 @@
 # the package under ~/.local/share, and a launcher on PATH.
 set -euo pipefail
 
-DEPS=(python-paho-mqtt python-cryptography python-textual)
+DEPS=(python-paho-mqtt python-cryptography python-textual python-gobject gtk4 libadwaita)
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-relay"
 BIN_DIR="$HOME/.local/bin"
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 
 if ! command -v pacman >/dev/null 2>&1; then
   echo "This installer targets Arch/Omarchy (needs pacman). On another distro," >&2
@@ -31,7 +32,11 @@ exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" python3 -m omarchy_relay.cli
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 
-echo "==> Installed."
+mkdir -p "$DESKTOP_DIR"
+cp "$REPO_DIR/packaging/omarchy-relay.desktop" "$DESKTOP_DIR/"
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+
+echo "==> Installed. 'Omarchy Relay' is in your app launcher (omarchy-relay gui), or use the CLI:"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "    NOTE: $BIN_DIR is not on your PATH. Omarchy adds it by default; if yours doesn't, add:" ;
@@ -40,4 +45,4 @@ esac
 echo "==> Next steps:"
 echo "    1. Point omarchy-relay at a broker you control (docker/ has a self-hosted Mosquitto setup)."
 echo "    2. omarchy-relay init"
-echo "    3. omarchy-relay chat        (or: omarchy-relay chat --tui)"
+echo "    3. omarchy-relay gui         (or: chat / chat --tui in a terminal)"

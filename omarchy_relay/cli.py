@@ -108,6 +108,18 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    try:
+        from .gui import run_gui
+    except (ImportError, ValueError) as exc:
+        print(f"GTK4/libadwaita bindings aren't available: {exc}", file=sys.stderr)
+        print("Install with: sudo pacman -S python-gobject gtk4 libadwaita", file=sys.stderr)
+        return 1
+    run_gui(cfg)
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     cfg = _load_config()
     run_daemon(cfg)
@@ -200,6 +212,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("chat", help="interactive chat session")
     p.add_argument("--tui", action="store_true", help="use the full-screen Textual UI")
     p.set_defaults(func=cmd_chat)
+
+    p = sub.add_parser("gui", help="native GTK4/libadwaita chat window")
+    p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("daemon", help="headless listener: prints chat, auto-saves incoming files")
     p.set_defaults(func=cmd_daemon)

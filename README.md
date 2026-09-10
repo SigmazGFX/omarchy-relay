@@ -85,12 +85,15 @@ cd ~/Projects/omarchy-relay
 ./install.sh
 ```
 
-This installs `python-paho-mqtt`, `python-cryptography`, `python-textual`
-via `pacman`, copies the package to `~/.local/share/omarchy-relay`, and
-puts a launcher at `~/.local/bin/omarchy-relay`.
+This installs `python-paho-mqtt`, `python-cryptography`, `python-textual`,
+`python-gobject`, `gtk4`, and `libadwaita` via `pacman`, copies the package
+to `~/.local/share/omarchy-relay`, puts a launcher at
+`~/.local/bin/omarchy-relay`, and adds "Omarchy Relay" to your app
+launcher.
 
 On another distro: create a venv, `pip install paho-mqtt cryptography
-textual`, and run `python3 -m omarchy_relay.cli` from inside the repo.
+textual PyGObject`, install GTK4 + libadwaita through your package
+manager, and run `python3 -m omarchy_relay.cli` from inside the repo.
 
 ## Set up a broker
 
@@ -140,20 +143,29 @@ Multiple devices join the same network by using the same `network.name` +
 ## Use it
 
 ```sh
-omarchy-relay chat              # line-oriented interactive chat
-omarchy-relay chat --tui        # full-screen Textual UI
-omarchy-relay peers             # list who's online right now
+omarchy-relay gui                # native GTK4/libadwaita chat window
+omarchy-relay chat               # line-oriented interactive chat
+omarchy-relay chat --tui         # full-screen Textual UI
+omarchy-relay peers              # list who's online right now
 omarchy-relay send FILE [--to nickname]   # send a file (default: broadcast)
 omarchy-relay msg "text" [--to nickname]  # one-off message, no interactive session
-omarchy-relay daemon            # headless: prints chat, auto-saves incoming files
+omarchy-relay daemon             # headless: prints chat, auto-saves incoming files
 ```
+
+`gui` is also in your application launcher as **Omarchy Relay**. It has a
+peer sidebar with online status, a message log, a file-attach button, and
+a Settings screen (gear icon) for editing nickname/network
+name/passphrase/broker host/port/TLS/credentials without touching the
+config file by hand — saving reconnects using the new settings
+immediately.
 
 Inside `chat`: `/peers`, `/msg <nick> <text>`, `/send <path> [nick]`,
 `/help`, `/quit`.
 
 Received files land in `transfer.downloads_dir` (default
-`~/Downloads/omarchy-relay`), with a desktop notification via
-`notify-send` if it's installed.
+`~/Downloads/omarchy-relay`). All interfaces (`gui`, `chat`, `chat --tui`,
+`daemon`) pop a desktop notification via `notify-send` for incoming chat
+messages, DMs, and received files, if `notify-send` is installed.
 
 ### Run the daemon in the background
 
@@ -202,9 +214,11 @@ transfers without keeping a chat window open.
 
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
-                    presence, chat, cli, tui)
+                    presence, chat, cli, tui, gui)
 install.sh          installs deps (pacman) + the omarchy-relay launcher
 uninstall.sh
+scripts/            one-shot quickstart installers (see Quickstart above)
 systemd/            user service unit for `omarchy-relay daemon`
+packaging/           .desktop file for the app launcher
 docker/             self-hosted Mosquitto broker (compose + docs)
 ```

@@ -56,7 +56,7 @@ if [ -z "$MQ_USER" ] || [ -z "$MQ_PASS" ]; then
 fi
 
 echo "==> Installing dependencies (sudo)"
-sudo pacman -S --needed python-paho-mqtt python-cryptography python-textual
+sudo pacman -S --needed python-paho-mqtt python-cryptography python-textual python-gobject gtk4 libadwaita
 
 NETWORK_PASSPHRASE="$(openssl rand -base64 24)"
 
@@ -71,6 +71,11 @@ cat > "$BIN_DIR/omarchy-relay" <<LAUNCHER
 exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" python3 -m omarchy_relay.cli "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/omarchy-relay"
+
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$DESKTOP_DIR"
+cp "$REPO_DIR/packaging/omarchy-relay.desktop" "$DESKTOP_DIR/"
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
 echo "==> Writing config (HiveMQ Cloud, TLS)"
 # Values below came from `read` (free-form user input, possibly containing
@@ -114,7 +119,7 @@ else
   echo " (double-check the cluster URL and credentials if it's failing to connect)"
 fi
 echo
-echo " Try it:      omarchy-relay chat        (or: omarchy-relay chat --tui)"
+echo " Try it:      omarchy-relay gui         (also in your app launcher, or: chat / chat --tui)"
 echo " Daemon logs: journalctl --user -fu omarchy-relay-daemon"
 echo
 echo " To add another machine to this network, on that machine run:"

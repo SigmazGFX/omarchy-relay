@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Omarchy Relay
+Comment=Realtime chat and file transfer between Omarchy machines
+Exec=omarchy-relay gui
+Icon=user-available-symbolic
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+StartupNotify=true

@@ -36,7 +36,7 @@ fi
 NETWORK_NAME="${NETWORK_NAME:-home}"
 
 echo "==> Installing dependencies + Mosquitto (sudo)"
-sudo pacman -S --needed python-paho-mqtt python-cryptography python-textual mosquitto
+sudo pacman -S --needed python-paho-mqtt python-cryptography python-textual python-gobject gtk4 libadwaita mosquitto
 
 MQ_USER="omarchy"
 MQ_PASS="$(openssl rand -base64 18)"
@@ -71,6 +71,11 @@ cat > "$BIN_DIR/omarchy-relay" <<LAUNCHER
 exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" python3 -m omarchy_relay.cli "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/omarchy-relay"
+
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$DESKTOP_DIR"
+cp "$REPO_DIR/packaging/omarchy-relay.desktop" "$DESKTOP_DIR/"
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
 echo "==> Writing config"
 python3 -c "
@@ -108,7 +113,7 @@ else
   echo "   journalctl --user -xeu omarchy-relay-daemon"
 fi
 echo
-echo " Try it:      omarchy-relay chat        (or: omarchy-relay chat --tui)"
+echo " Try it:      omarchy-relay gui         (also in your app launcher, or: chat / chat --tui)"
 echo " Daemon logs: journalctl --user -fu omarchy-relay-daemon"
 echo
 echo " To add another machine to this network: on that machine, run"
