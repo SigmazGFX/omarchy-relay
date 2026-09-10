@@ -167,9 +167,13 @@ Inside `chat`: `/peers`, `/msg <nick> <text>`, `/send <path> [nick]`,
 `/help`, `/quit`.
 
 Received files land in `transfer.downloads_dir` (default
-`~/Downloads/omarchy-relay`). All interfaces (`gui`, `chat`, `chat --tui`,
-`daemon`) pop a desktop notification via `notify-send` for incoming chat
-messages, DMs, and received files, if `notify-send` is installed.
+`~/Downloads/omarchy-relay`) — in `gui`, that log entry has an **Open
+Folder** button. All interfaces (`gui`, `chat`, `chat --tui`, `daemon`)
+pop a desktop notification via `notify-send` for incoming chat messages,
+DMs, and received files (if `notify-send` is installed), plus a quiet
+"ding" via `canberra-gtk-play` using your system's own sound theme (if
+`libcanberra` is installed — it usually already is). Neither fires for
+your own messages echoing back to you.
 
 ### Run the daemon in the background
 

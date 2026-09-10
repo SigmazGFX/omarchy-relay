@@ -21,7 +21,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from .chat import _notify
+from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
@@ -177,6 +177,29 @@ class RelayWindow(Adw.ApplicationWindow):
         label.set_markup(f"<span alpha='55%' size='small'>— {GLib.markup_escape_text(text)} —</span>")
         self._append_row(label)
 
+    def _append_file_received(self, meta: dict, path: Path) -> None:
+        box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            margin_start=12,
+            margin_end=12,
+            margin_top=4,
+            margin_bottom=4,
+        )
+        label = Gtk.Label(xalign=0, hexpand=True, wrap=True)
+        label.set_markup(
+            f"<span alpha='75%'>received '{GLib.markup_escape_text(meta['filename'])}' "
+            f"from {GLib.markup_escape_text(meta['nick'])}</span>"
+        )
+        open_btn = Gtk.Button(label="Open Folder")
+        open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
+        box.append(label)
+        box.append(open_btn)
+        self._append_row(box)
+
+    def _open_containing_folder(self, path: Path) -> None:
+        Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
+
     def _refresh_peer_list(self) -> None:
         self.peer_list.remove_all()
         for _device_id, data in sorted(self.peers.snapshot().items(), key=lambda kv: kv[1].get("nick", "")):
@@ -203,10 +226,12 @@ class RelayWindow(Adw.ApplicationWindow):
         # own publish topic) — don't notify ourselves for our own messages.
         if obj.get("from") != self.cfg.device_id:
             _notify(obj["nick"], obj["text"])
+            _ding()
 
     def _handle_dm(self, obj: dict) -> None:
         self._append_message(f"DM from {obj['nick']}", obj["ts"], obj["text"])
         _notify(f"DM from {obj['nick']}", obj["text"])
+        _ding()
 
     def _handle_presence(self, device_id: str, data) -> None:
         changed, previous = self.peers.update(device_id, data)
@@ -221,8 +246,9 @@ class RelayWindow(Adw.ApplicationWindow):
         self._refresh_peer_list()
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
-        GLib.idle_add(self._append_system, f"received '{meta['filename']}' from {meta['nick']} → {path}")
+        GLib.idle_add(self._append_file_received, meta, path)
         _notify("File received", f"{meta['filename']} from {meta['nick']}")
+        _ding()
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
         GLib.idle_add(self._append_system, f"file '{meta.get('filename', '?')}' failed: {msg}")

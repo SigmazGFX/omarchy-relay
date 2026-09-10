@@ -38,19 +38,35 @@ def _notify(summary: str, body: str) -> None:
             pass
 
 
+def _ding() -> None:
+    """Plays the desktop's own themed "new message" sound, quietly — not a
+    bundled sound file, so it matches whatever sound theme is installed."""
+    if shutil.which("canberra-gtk-play"):
+        try:
+            subprocess.run(
+                ["canberra-gtk-play", "-i", "message-new-instant", "-V", "-6"],
+                check=False,
+                timeout=2,
+            )
+        except Exception:
+            pass
+
+
 def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
     client = RelayClient(cfg)
 
     def on_chat(obj):
         print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {obj['text']}")
         # Broadcasts echo back to the sender too (we're subscribed to our own
-        # publish topic) — don't pop a notification for our own messages.
+        # publish topic) — don't pop a notification/sound for our own messages.
         if obj.get("from") != cfg.device_id:
             _notify(obj["nick"], obj["text"])
+            _ding()
 
     def on_dm(obj):
         print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {obj['text']}")
         _notify(f"DM from {obj['nick']}", obj["text"])
+        _ding()
 
     def on_presence(device_id, data):
         changed, previous = peers.update(device_id, data)
