@@ -14,8 +14,6 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NICKNAME="${1:-$(hostname)}"
-NETWORK_NAME="${OMARCHY_RELAY_NETWORK:-home}"
 
 if ! command -v pacman >/dev/null 2>&1; then
   echo "This targets Arch/Omarchy (needs pacman)." >&2
@@ -27,6 +25,19 @@ if [ -f "$HOME/.config/omarchy-relay/config.toml" ]; then
   echo "(delete it first, or run ./install.sh + 'omarchy-relay init' if you want a fresh setup)" >&2
   exit 1
 fi
+
+# NICKNAME/NETWORK_NAME can be pre-set in the environment to skip these
+# prompts (useful for scripting); otherwise ask.
+DEFAULT_NICKNAME="$(hostname)"
+if [ -z "${NICKNAME:-}" ]; then
+  read -r -p "Nickname [$DEFAULT_NICKNAME]: " NICKNAME
+fi
+NICKNAME="${NICKNAME:-$DEFAULT_NICKNAME}"
+
+if [ -z "${NETWORK_NAME:-}" ]; then
+  read -r -p "Network name (a room/group of devices) [home]: " NETWORK_NAME
+fi
+NETWORK_NAME="${NETWORK_NAME:-home}"
 
 echo "==> Installing dependencies (sudo)"
 sudo pacman -S --needed python-paho-mqtt python-cryptography python-textual

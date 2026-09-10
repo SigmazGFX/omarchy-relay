@@ -21,6 +21,11 @@ cd ~/Projects/omarchy-relay
 ./scripts/quickstart-hivemq.sh       # zero infra: rides HiveMQ's free public broker
 ```
 
+Every one of these prompts for a **nickname** and **network name** up
+front (both have sane defaults — hostname and `home` — just press enter to
+accept them). Set `NICKNAME=...` and/or `NETWORK_NAME=...` in the
+environment beforehand to skip the prompts, e.g. for scripted installs.
+
 All three install everything, configure omarchy-relay, and start it as a
 background service — the only manual step every path shares is your
 `sudo` password (needed to install three packages from the Arch repos).
