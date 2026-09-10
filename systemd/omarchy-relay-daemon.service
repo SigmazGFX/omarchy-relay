@@ -1,0 +1,12 @@
+[Unit]
+Description=omarchy-relay background listener (chat + incoming files)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/omarchy-relay daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

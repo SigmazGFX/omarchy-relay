@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+from .config import Config
+from .mqttclient import RelayClient
+from .presence import PeerDirectory
+from .transfer import FileReceiver, send_file
+
+_HELP = """\
+Commands:
+  /peers                 list who's online
+  /msg <nick> <text>     send a direct message
+  /send <path> [nick]    send a file (broadcast, or DM if nick given)
+  /help                  show this help
+  /quit                  leave
+Anything else is sent as a broadcast chat message.\
+"""
+
+
+def _fmt_ts(ts: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _notify(summary: str, body: str) -> None:
+    if shutil.which("notify-send"):
+        try:
+            subprocess.run(["notify-send", "omarchy-relay", f"{summary}: {body}"], check=False, timeout=2)
+        except Exception:
+            pass
+
+
+def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
+    client = RelayClient(cfg)
+
+    def on_chat(obj):
+        print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {obj['text']}")
+
+    def on_dm(obj):
+        print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {obj['text']}")
+
+    def on_presence(device_id, data):
+        changed, previous = peers.update(device_id, data)
+        if not changed:
+            return
+        if data is None:
+            name = previous.get("nick", device_id) if previous else device_id
+            print_line(f"* {name} went offline")
+        elif previous is None:
+            print_line(f"* {data['nick']} is online")
+
+    client.on_chat = on_chat
+    client.on_dm = on_dm
+    client.on_presence = on_presence
+    return client
+
+
+def run_chat(cfg: Config) -> None:
+    peers = PeerDirectory()
+
+    def print_line(text: str) -> None:
+        sys.stdout.write(f"\r\x1b[2K{text}\n> ")
+        sys.stdout.flush()
+
+    client = _build_client(cfg, peers, print_line)
+
+    receiver = FileReceiver(
+        cfg,
+        on_complete=lambda meta, path: (
+            print_line(f"* received '{meta['filename']}' from {meta['nick']} -> {path}"),
+            _notify("File received", f"{meta['filename']} from {meta['nick']}"),
+        ),
+        on_error=lambda meta, msg: print_line(f"* file '{meta.get('filename', '?')}' from {meta.get('nick', '?')} failed: {msg}"),
+    )
+    client.on_file_meta = receiver.handle_meta
+    client.on_file_chunk = receiver.handle_chunk
+
+    print(f"Connecting to {cfg.broker_host}:{cfg.broker_port} ...")
+    client.connect()
+    print(f"Connected as '{cfg.nickname}' on network '{cfg.network_name}'. /help for commands.")
+
+    try:
+        while True:
+            try:
+                line = input("> ")
+            except EOFError:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            if line in ("/quit", "/exit"):
+                break
+            if line == "/help":
+                print(_HELP)
+            elif line == "/peers":
+                snapshot = peers.snapshot()
+                if not snapshot:
+                    print("(nobody else is online)")
+                else:
+                    for device_id, data in sorted(snapshot.items(), key=lambda kv: kv[1].get("nick", "")):
+                        print(f"  {data.get('nick', '?')}  ({device_id})")
+            elif line.startswith("/msg "):
+                rest = line[len("/msg ") :]
+                if " " not in rest:
+                    print("usage: /msg <nick> <text>")
+                    continue
+                nick, text = rest.split(" ", 1)
+                target = peers.resolve(nick)
+                if not target:
+                    print(f"no such peer online: {nick}")
+                    continue
+                client.send_dm(target, {"id": uuid.uuid4().hex, "ts": time.time(), "from": cfg.device_id, "nick": cfg.nickname, "text": text})
+            elif line.startswith("/send "):
+                args = line[len("/send ") :].split()
+                if not args:
+                    print("usage: /send <path> [nick]")
+                    continue
+                path = Path(args[0])
+                to = "*"
+                if len(args) > 1:
+                    target = peers.resolve(args[1])
+                    if not target:
+                        print(f"no such peer online: {args[1]}")
+                        continue
+                    to = target
+                try:
+                    transfer_id, total_chunks = send_file(client, cfg, path, to=to)
+                    print(f"* sending '{path.name}' ({total_chunks} chunks, transfer {transfer_id})")
+                except (FileNotFoundError, ValueError) as exc:
+                    print(f"! {exc}")
+            elif line.startswith("/"):
+                print(f"unknown command: {line}  (try /help)")
+            else:
+                client.send_chat({"id": uuid.uuid4().hex, "ts": time.time(), "from": cfg.device_id, "nick": cfg.nickname, "text": line})
+    finally:
+        print("\ndisconnecting...")
+        client.disconnect()
+
+
+def run_daemon(cfg: Config) -> None:
+    peers = PeerDirectory()
+
+    def print_line(text: str) -> None:
+        print(text, flush=True)
+
+    client = _build_client(cfg, peers, print_line)
+
+    receiver = FileReceiver(
+        cfg,
+        on_complete=lambda meta, path: (
+            print_line(f"received '{meta['filename']}' from {meta['nick']} -> {path}"),
+            _notify("File received", f"{meta['filename']} from {meta['nick']}"),
+        ),
+        on_error=lambda meta, msg: print_line(f"file '{meta.get('filename', '?')}' from {meta.get('nick', '?')} failed: {msg}"),
+    )
+    client.on_file_meta = receiver.handle_meta
+    client.on_file_chunk = receiver.handle_chunk
+
+    print_line(f"omarchy-relay daemon: connecting to {cfg.broker_host}:{cfg.broker_port} as '{cfg.nickname}' on '{cfg.network_name}'")
+    client.connect()
+    print_line("connected, listening (Ctrl-C to stop)")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        client.disconnect()
