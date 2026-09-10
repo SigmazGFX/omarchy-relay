@@ -9,6 +9,7 @@ update is marshalled onto GTK's main loop via GLib.idle_add.
 from __future__ import annotations
 
 import dataclasses
+import tempfile
 import threading
 import time
 import uuid
@@ -19,13 +20,16 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
 from .transfer import FileReceiver, send_file
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_CLIPBOARD_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/tiff", "image/webp")
 
 
 def _fmt_ts(ts: float) -> str:
@@ -85,8 +89,12 @@ class RelayWindow(Adw.ApplicationWindow):
             margin_top=8,
             margin_bottom=8,
         )
-        self.entry = Gtk.Entry(hexpand=True, placeholder_text="Message…")
+        self.entry = Gtk.Entry(hexpand=True, placeholder_text="Message… (paste an image to send it)")
         self.entry.connect("activate", self._on_send)
+        paste_controller = Gtk.EventControllerKey()
+        paste_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        paste_controller.connect("key-pressed", self._on_entry_key_pressed)
+        self.entry.add_controller(paste_controller)
         attach_btn = Gtk.Button(icon_name="mail-attachment-symbolic", tooltip_text="Send a file")
         attach_btn.connect("clicked", self._on_attach)
         send_btn = Gtk.Button(icon_name="mail-send-symbolic", tooltip_text="Send")
@@ -201,6 +209,29 @@ class RelayWindow(Adw.ApplicationWindow):
     def _open_containing_folder(self, path: Path) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
 
+    def _append_image(self, nick: str, path: Path) -> None:
+        box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+            margin_start=12,
+            margin_end=12,
+            margin_top=6,
+            margin_bottom=4,
+        )
+        caption = Gtk.Label(xalign=0)
+        caption.set_markup(f"<b>{GLib.markup_escape_text(nick)}</b> sent an image")
+        picture = Gtk.Picture.new_for_filename(str(path))
+        picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        picture.set_halign(Gtk.Align.START)
+        picture.set_size_request(-1, 240)  # cap the thumbnail height; width follows aspect ratio
+        picture.set_can_shrink(True)
+        open_btn = Gtk.Button(label="Open Folder", halign=Gtk.Align.START)
+        open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
+        box.append(caption)
+        box.append(picture)
+        box.append(open_btn)
+        self._append_row(box)
+
     def _refresh_peer_list(self) -> None:
         self.peer_list.remove_all()
         for _device_id, data in sorted(self.peers.snapshot().items(), key=lambda kv: kv[1].get("nick", "")):
@@ -248,7 +279,10 @@ class RelayWindow(Adw.ApplicationWindow):
         self._refresh_peer_list()
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
-        GLib.idle_add(self._append_file_received, meta, path)
+        if path.suffix.lower() in _IMAGE_EXTENSIONS:
+            GLib.idle_add(self._append_image, meta["nick"], path)
+        else:
+            GLib.idle_add(self._append_file_received, meta, path)
         _notify("File received", f"{meta['filename']} from {meta['nick']}")
         _ding()
 
@@ -283,6 +317,41 @@ class RelayWindow(Adw.ApplicationWindow):
             self._append_system(f"sending '{path.name}' ({total_chunks} chunks, transfer {transfer_id})")
         except (FileNotFoundError, ValueError) as exc:
             self._append_system(f"! {exc}")
+
+    def _on_entry_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
+        is_paste = keyval == Gdk.KEY_v and bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if not is_paste:
+            return False  # not our shortcut — let it through
+        clipboard = self.get_clipboard()
+        formats = clipboard.get_formats()
+        if not any(formats.contain_mime_type(mime) for mime in _CLIPBOARD_IMAGE_MIME_TYPES):
+            return False  # no image on the clipboard — fall through to normal text paste
+        clipboard.read_texture_async(None, self._on_clipboard_texture_ready)
+        return True  # image found: handle it ourselves, suppress the default text paste
+
+    def _on_clipboard_texture_ready(self, clipboard: Gdk.Clipboard, result: Gio.AsyncResult) -> None:
+        try:
+            texture = clipboard.read_texture_finish(result)
+        except GLib.Error as exc:
+            self._append_system(f"clipboard paste failed: {exc}")
+            return
+        if texture is None:
+            return
+        tmp_path = Path(tempfile.gettempdir()) / f"omarchy-relay-paste-{uuid.uuid4().hex[:8]}.png"
+        texture.save_to_png(str(tmp_path))
+        try:
+            send_file(self.client, self.cfg, tmp_path, to="*")
+        except (FileNotFoundError, ValueError) as exc:
+            self._append_system(f"! {exc}")
+            tmp_path.unlink(missing_ok=True)
+            return
+        # Our own broadcast files are deliberately not echoed back to us
+        # (FileReceiver skips its own sender), so without this we'd never
+        # see the image we just pasted in our own chat.
+        self._append_image(self.cfg.nickname, tmp_path)
+        # Gtk.Picture decodes the file into a texture at construction time,
+        # so it's safe to clean up shortly after rather than keep it around.
+        GLib.timeout_add_seconds(5, lambda: tmp_path.unlink(missing_ok=True) or False)
 
     def _on_close_request(self, _window) -> bool:
         self.client.disconnect()
