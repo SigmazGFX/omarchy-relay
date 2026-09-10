@@ -8,36 +8,43 @@ VPS, behind NAT, wherever) can talk to any other device in the same
 
 ## Quickstart (one command, no manual broker setup)
 
-Two flavors, depending on how much you trust the network:
+Three flavors, depending on how much infrastructure/trust you want:
 
 ```sh
 git clone https://github.com/SigmazGFX/omarchy-relay ~/Projects/omarchy-relay
 cd ~/Projects/omarchy-relay
 
-./scripts/quickstart.sh            # self-hosted: installs + runs your own broker
+./scripts/quickstart.sh              # self-hosted: installs + runs your own broker
 # or
-./scripts/quickstart-hivemq.sh     # zero infra: rides HiveMQ's free public broker
+./scripts/quickstart-hivemq-cloud.sh # your own free HiveMQ Cloud cluster (sign up first)
+# or
+./scripts/quickstart-hivemq.sh       # zero infra: rides HiveMQ's free public broker
 ```
 
-Both install everything, configure omarchy-relay, and start it as a
-background service — the only manual step either way is your `sudo`
-password (needed to install three packages from the Arch repos).
+All three install everything, configure omarchy-relay, and start it as a
+background service — the only manual step every path shares is your
+`sudo` password (needed to install three packages from the Arch repos).
 
 - **`quickstart.sh`** additionally self-hosts a Mosquitto broker on this
   machine with generated credentials and opens the firewall port for it.
-  Recommended default — it's your broker, nobody else's.
+  Most private, but it's infrastructure you now run and keep online.
+- **`quickstart-hivemq-cloud.sh`** uses your own free
+  [HiveMQ Cloud](https://console.hivemq.cloud) cluster instead — private
+  (TLS + your own credentials), but no broker for you to host. Requires a
+  free sign-up first (the script tells you exactly what to click); it then
+  prompts for the cluster URL + a username/password you create there and
+  wires them in.
 - **`quickstart-hivemq.sh`** skips all of that and points at
-  `broker.hivemq.com` instead — no broker to run, no port to open. It's
-  free and requires no signup, but it's a public, unauthenticated broker
-  shared with the whole internet: your message/file *content* is still
-  encrypted (see [Security model](#security-model)), but there's no
-  privacy guarantee for metadata and no uptime promise. Fine for trying
-  this out or casual use; not for anything you'd mind losing or having
-  timing/size metadata seen.
+  `broker.hivemq.com` instead — no signup, no broker to run, no port to
+  open. It's a public, unauthenticated broker shared with the whole
+  internet: your message/file *content* is still encrypted (see
+  [Security model](#security-model)), but there's no privacy guarantee for
+  metadata and no uptime promise. Fine for trying this out or casual use;
+  not for anything you'd mind losing or having timing/size metadata seen.
 
-Either way, the script prints the network name/passphrase/broker details
-at the end so you can add other machines to the same network. See
-[Install](#install) below for the manual/customizable path instead.
+Every path prints the network name/passphrase/broker details at the end so
+you can add other machines to the same network. See [Install](#install)
+below for the manual/customizable path instead.
 
 ## How it works
 
@@ -93,13 +100,21 @@ Options, roughly in order of "more private" to "less setup":
    [`docker/README.md`](docker/README.md), which also covers making it
    reachable from off-box (private overlay network, TLS, or a managed
    provider).
-2. **HiveMQ Cloud (free tier)** — a *private* managed broker, TLS and
-   credentials included, no infrastructure to run yourself. Sign up at
-   [hivemq.com/mqtt-cloud-broker](https://www.hivemq.com/mqtt-cloud-broker/),
-   create a free cluster, and use the host/port/username/password it gives
-   you in `omarchy-relay init` (broker option 1) with `tls = true`.
+2. **HiveMQ Cloud (free "Serverless" tier)** — a *private* managed broker,
+   TLS and your own credentials, no infrastructure to run yourself:
+   1. Sign up free at [console.hivemq.cloud](https://console.hivemq.cloud).
+   2. Create a Serverless cluster (the free tier).
+   3. In the cluster's **Access Management**, create a username/password
+      credential.
+   4. Copy the cluster URL from its **Connection** tab — it looks like
+      `<id>.s1.<region>.hivemq.cloud`.
+
+   Then either run `./scripts/quickstart-hivemq-cloud.sh` (prompts for
+   those three values and does everything else), or run `omarchy-relay
+   init` and pick broker option 2 to enter them by hand. Port (`8883`) and
+   TLS are set automatically either way — HiveMQ Cloud requires both.
 3. **HiveMQ's public test broker** — `scripts/quickstart-hivemq.sh`, or
-   `omarchy-relay init` broker option 2. Zero setup, zero signup, but
+   `omarchy-relay init` broker option 3. Zero setup, zero signup, but
    public and unauthenticated — see the quickstart section above for the
    tradeoffs.
 

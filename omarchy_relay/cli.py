@@ -32,14 +32,36 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     print(
         "\nBroker — where this network's traffic relays through:\n"
-        "  1) A broker you control (self-hosted, or a managed provider) — recommended\n"
-        "  2) HiveMQ's free public test broker — zero setup, but it's shared with the\n"
+        "  1) A broker you control (self-hosted, or a managed provider)\n"
+        "  2) Your own HiveMQ Cloud cluster (free tier) — sign up first, then paste\n"
+        "     in its connection details here — recommended if you don't want to run\n"
+        "     a broker yourself but still want it private to you\n"
+        "  3) HiveMQ's free public test broker — zero setup, but it's shared with the\n"
         "     whole internet: no auth, no uptime/persistence guarantee. Your content is\n"
         "     still encrypted with your passphrase, but don't rely on this for anything\n"
         "     you care about.\n"
     )
     broker_choice = input("Choice [1]: ").strip() or "1"
     if broker_choice == "2":
+        print(
+            "\nDon't have a cluster yet? Sign up free at https://console.hivemq.cloud,\n"
+            "create a Serverless cluster, then under Access Management create a\n"
+            "username/password credential. The cluster URL is on its Connection tab\n"
+            "(looks like <id>.s1.<region>.hivemq.cloud).\n"
+        )
+        broker_host = input("HiveMQ Cloud cluster URL: ").strip()
+        if not broker_host:
+            print("Cluster URL is required.")
+            return 1
+        broker_port = 8883
+        broker_tls = True
+        broker_username = input("Username: ").strip()
+        broker_password = getpass.getpass("Password: ").strip()
+        if not broker_username or not broker_password:
+            print("HiveMQ Cloud requires a username and password.")
+            return 1
+        print(f"Using HiveMQ Cloud cluster at {broker_host}:{broker_port} (TLS).")
+    elif broker_choice == "3":
         broker_host = "broker.hivemq.com"
         broker_port = 8883
         broker_tls = True
