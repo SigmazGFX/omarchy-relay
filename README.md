@@ -64,7 +64,12 @@ below for the manual/customizable path instead.
 - **Presence** uses MQTT retained messages + Last Will: a device publishes
   its `{nickname, timestamp}` retained on connect, and the broker clears it
   automatically (Last Will) if the device disconnects ungracefully — so
-  `peers` reflects who's actually online, not a stale list.
+  `peers` reflects who's actually online, not a stale list. Going offline
+  is debounced 5 seconds before a peer actually disappears from any
+  online list — covers a brief reconnect (network blip, client restart)
+  without it flickering off and back on; if they don't return in time,
+  they're removed and "went offline" fires then, not the instant their
+  presence first cleared.
 - **Chat** is a broadcast topic within the network; **DMs** are routed to a
   per-device topic, but note DMs are *routed*, not cryptographically
   private from other members — see [Security model](#security-model).

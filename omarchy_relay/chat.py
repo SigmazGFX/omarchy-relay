@@ -70,13 +70,15 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
 
     def on_presence(device_id, data):
         changed, previous = peers.update(device_id, data)
-        if not changed:
-            return
-        if data is None:
-            name = previous.get("nick", device_id) if previous else device_id
-            print_line(f"* {name} went offline")
-        elif previous is None:
+        if changed and data is not None and previous is None:
             print_line(f"* {data['nick']} is online")
+        # "went offline" is debounced — see peers.on_removed below, which
+        # only fires once a peer has actually stayed gone for 5s.
+
+    def on_removed(device_id, last_known):
+        print_line(f"* {last_known.get('nick', device_id)} went offline")
+
+    peers.on_removed = on_removed
 
     def on_action_handled(request_obj, outcome):
         print_line(f"* remote action '{request_obj.get('action', '?')}' from {request_obj.get('nick', '?')}: {outcome}")

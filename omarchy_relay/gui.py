@@ -117,6 +117,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self.client.on_presence = self._threaded(self._handle_presence)
         self.client.on_file_meta = self._threaded(self.receiver.handle_meta)
         self.client.on_file_chunk = self._threaded(self.receiver.handle_chunk)
+        self.peers.on_removed = self._threaded(self._handle_peer_removed)
 
     # -- thread marshalling ------------------------------------------------
 
@@ -236,13 +237,14 @@ class RelayWindow(Adw.ApplicationWindow):
     def _handle_presence(self, device_id: str, data) -> None:
         changed, previous = self.peers.update(device_id, data)
         if not changed:
-            return
+            return  # includes a peer starting its 5s offline debounce — sidebar is unchanged until it actually fires
+        if data is not None and previous is None and self.cfg.show_presence:
+            self._append_system(f"{data['nick']} is online")
+        self._refresh_peer_list()
+
+    def _handle_peer_removed(self, device_id: str, last_known: dict) -> None:
         if self.cfg.show_presence:
-            if data is None:
-                name = previous.get("nick", device_id) if previous else device_id
-                self._append_system(f"{name} went offline")
-            elif previous is None:
-                self._append_system(f"{data['nick']} is online")
+            self._append_system(f"{last_known.get('nick', device_id)} went offline")
         self._refresh_peer_list()
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:

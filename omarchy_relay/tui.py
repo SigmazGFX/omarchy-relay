@@ -101,12 +101,13 @@ class RelayApp(App):
     def _handle_presence(self, device_id: str, data) -> None:
         changed, previous = self.peers.update(device_id, data)
         if not changed:
-            return
-        if data is None:
-            name = previous.get("nick", device_id) if previous else device_id
-            self._log(f"* {name} went offline")
-        elif previous is None:
+            return  # includes a peer starting its 5s offline debounce — list is unchanged until it actually fires
+        if data is not None and previous is None:
             self._log(f"* {data['nick']} is online")
+        self._refresh_sidebar()
+
+    def _handle_peer_removed(self, device_id: str, last_known: dict) -> None:
+        self._log(f"* {last_known.get('nick', device_id)} went offline")
         self._refresh_sidebar()
 
     def _refresh_sidebar(self) -> None:
