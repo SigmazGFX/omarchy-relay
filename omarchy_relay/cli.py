@@ -62,7 +62,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             return 1
         print(f"Using HiveMQ Cloud cluster at {broker_host}:{broker_port} (TLS).")
     elif broker_choice == "3":
-        broker_host = "broker.hivemq.com"
+        broker_host = "mqttdashboard.com"
         broker_port = 8883
         broker_tls = True
         broker_username = ""

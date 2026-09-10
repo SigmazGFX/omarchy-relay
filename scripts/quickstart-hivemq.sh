@@ -3,7 +3,7 @@
 # broker, no firewall changes, no exposed port. The only sudo step left is
 # installing three packages from the Arch repos.
 #
-# HiveMQ's public broker (broker.hivemq.com) has NO authentication and is
+# HiveMQ's public broker (mqttdashboard.com) has NO authentication and is
 # shared with the entire internet. omarchy-relay's own encryption still
 # protects message/file CONTENT (only devices with your passphrase can read
 # it), but there's no privacy guarantee for metadata, no auth stopping
@@ -69,7 +69,7 @@ Config(
     device_id=default_device_id(),
     network_name='$NETWORK_NAME',
     passphrase='$NETWORK_PASSPHRASE',
-    broker_host='broker.hivemq.com',
+    broker_host='mqttdashboard.com',
     broker_port=8883,
     broker_tls=True,
     broker_username='',
@@ -89,7 +89,7 @@ echo
 echo "======================================================================"
 if systemctl --user is-active --quiet omarchy-relay-daemon; then
   echo " omarchy-relay is running as '$NICKNAME' on network '$NETWORK_NAME',"
-  echo " relayed through HiveMQ's public test broker (broker.hivemq.com)."
+  echo " relayed through HiveMQ's public test broker (mqttdashboard.com)."
 else
   echo " Setup finished, but the daemon isn't active — check:"
   echo "   journalctl --user -xeu omarchy-relay-daemon"
@@ -107,7 +107,7 @@ echo "   ./install.sh && omarchy-relay init   (choose broker option 2)"
 echo " or install.sh + set this config by hand, using:"
 echo "   network name:     $NETWORK_NAME"
 echo "   passphrase:       $NETWORK_PASSPHRASE"
-echo "   broker host:      broker.hivemq.com"
+echo "   broker host:      mqttdashboard.com"
 echo "   broker port:      8883"
 echo "   broker tls:       yes"
 echo "   broker username:  (leave blank)"

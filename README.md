@@ -40,7 +40,7 @@ background service — the only manual step every path shares is your
   prompts for the cluster URL + a username/password you create there and
   wires them in.
 - **`quickstart-hivemq.sh`** skips all of that and points at
-  `broker.hivemq.com` instead — no signup, no broker to run, no port to
+  `mqttdashboard.com` instead — no signup, no broker to run, no port to
   open. It's a public, unauthenticated broker shared with the whole
   internet: your message/file *content* is still encrypted (see
   [Security model](#security-model)), but there's no privacy guarantee for
