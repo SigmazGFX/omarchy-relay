@@ -31,6 +31,105 @@ from .transfer import FileReceiver, send_file
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _CLIPBOARD_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/tiff", "image/webp")
 
+# WhatsApp-inspired palette: teal header/accent, mint bubble for our own
+# messages, white bubble for everyone else's, on the classic warm-beige
+# chat wallpaper.
+_WHATSAPP_CSS = """
+headerbar.whatsapp-header {
+  background: #075E54;
+  color: #ffffff;
+}
+headerbar.whatsapp-header windowtitle > label.title {
+  color: #ffffff;
+}
+headerbar.whatsapp-header windowtitle > label.subtitle {
+  color: rgba(255, 255, 255, 0.75);
+}
+headerbar.whatsapp-header button {
+  color: #ffffff;
+}
+
+list.whatsapp-chat-bg {
+  background-color: #E5DDD5;
+}
+
+box.whatsapp-system-pill {
+  background-color: rgba(255, 255, 255, 0.9);
+  border-radius: 8px;
+  padding: 3px 10px;
+}
+
+box.bubble-mine {
+  background-color: #DCF8C6;
+  border-radius: 12px;
+  padding: 6px 10px;
+}
+box.bubble-theirs {
+  background-color: #ffffff;
+  border-radius: 12px;
+  padding: 6px 10px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.15);
+}
+label.bubble-sender {
+  color: #075E54;
+}
+label.bubble-text {
+  color: #111b21;
+}
+label.bubble-stamp {
+  color: rgba(17, 27, 33, 0.6);
+}
+label.whatsapp-system-text {
+  color: rgba(17, 27, 33, 0.75);
+}
+
+box.whatsapp-composer {
+  background-color: #F0F0F0;
+  padding: 8px;
+}
+entry.whatsapp-entry {
+  background-color: #ffffff;
+  color: #111b21;
+  border-radius: 18px;
+  padding: 8px 14px;
+  border: 1px solid #d9d9d9;
+  box-shadow: none;
+  outline: none;
+}
+entry.whatsapp-entry:focus,
+entry.whatsapp-entry:focus-within {
+  border: 1px solid #25D366;
+  box-shadow: none;
+  outline: none;
+}
+entry.whatsapp-entry text {
+  color: #111b21;
+}
+entry.whatsapp-entry text selection {
+  background-color: #25D366;
+  color: #ffffff;
+}
+button.whatsapp-send-btn {
+  background-color: #25D366;
+  color: #ffffff;
+  border-radius: 9999px;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+}
+button.whatsapp-attach-btn {
+  color: #54656F;
+  background: transparent;
+}
+
+list.whatsapp-sidebar {
+  background-color: #ffffff;
+}
+list.whatsapp-sidebar row {
+  border-bottom: 1px solid #ededed;
+}
+"""
+
 
 def _fmt_ts(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
@@ -46,8 +145,11 @@ class RelayWindow(Adw.ApplicationWindow):
         self.client = RelayClient(cfg)
         self.receiver = FileReceiver(cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
 
+        self._install_whatsapp_theme()
+
         toolbar_view = Adw.ToolbarView()
         header = Adw.HeaderBar()
+        header.add_css_class("whatsapp-header")
         self.title_widget = Adw.WindowTitle(title=f"Omarchy Relay — {cfg.nickname}", subtitle=f"{cfg.network_name} · connecting…")
         header.set_title_widget(self.title_widget)
         settings_btn = Gtk.Button(icon_name="preferences-system-symbolic", tooltip_text="Settings")
@@ -63,6 +165,7 @@ class RelayWindow(Adw.ApplicationWindow):
         sidebar_scroller = Gtk.ScrolledWindow(vexpand=True)
         self.peer_list = Gtk.ListBox()
         self.peer_list.add_css_class("navigation-sidebar")
+        self.peer_list.add_css_class("whatsapp-sidebar")
         self.peer_list.set_selection_mode(Gtk.SelectionMode.NONE)
         sidebar_scroller.set_child(self.peer_list)
         sidebar_page.set_child(sidebar_scroller)
@@ -75,30 +178,28 @@ class RelayWindow(Adw.ApplicationWindow):
         self.chat_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.chat_list = Gtk.ListBox()
         self.chat_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.chat_list.add_css_class("background")
+        self.chat_list.add_css_class("whatsapp-chat-bg")
         self.chat_scroller.set_child(self.chat_list)
         content_box.append(self.chat_scroller)
-
-        content_box.append(Gtk.Separator())
 
         entry_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=6,
-            margin_start=8,
-            margin_end=8,
-            margin_top=8,
-            margin_bottom=8,
         )
+        entry_row.add_css_class("whatsapp-composer")
         self.entry = Gtk.Entry(hexpand=True, placeholder_text="Message… (paste an image to send it)")
+        self.entry.add_css_class("whatsapp-entry")
         self.entry.connect("activate", self._on_send)
         paste_controller = Gtk.EventControllerKey()
         paste_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         paste_controller.connect("key-pressed", self._on_entry_key_pressed)
         self.entry.add_controller(paste_controller)
         attach_btn = Gtk.Button(icon_name="mail-attachment-symbolic", tooltip_text="Send a file")
+        attach_btn.add_css_class("whatsapp-attach-btn")
+        attach_btn.add_css_class("flat")
         attach_btn.connect("clicked", self._on_attach)
         send_btn = Gtk.Button(icon_name="mail-send-symbolic", tooltip_text="Send")
-        send_btn.add_css_class("suggested-action")
+        send_btn.add_css_class("whatsapp-send-btn")
         send_btn.connect("clicked", self._on_send)
         entry_row.append(self.entry)
         entry_row.append(attach_btn)
@@ -118,6 +219,13 @@ class RelayWindow(Adw.ApplicationWindow):
 
         self.connect("close-request", self._on_close_request)
         threading.Thread(target=self._connect_worker, daemon=True).start()
+
+    def _install_whatsapp_theme(self) -> None:
+        provider = Gtk.CssProvider()
+        provider.load_from_string(_WHATSAPP_CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
     def _wire_client_callbacks(self) -> None:
         self.client.on_chat = self._threaded(self._handle_chat)
@@ -162,64 +270,78 @@ class RelayWindow(Adw.ApplicationWindow):
         self.chat_list.append(row)
         GLib.idle_add(self._scroll_to_bottom)
 
-    def _append_message(self, header_text: str, ts: float, text: str) -> None:
-        box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=2,
+    def _bubble(self, is_mine: bool) -> tuple[Gtk.Box, Gtk.Box]:
+        """A left/right-aligned outer wrapper plus the bubble box inside it."""
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            halign=Gtk.Align.END if is_mine else Gtk.Align.START,
             margin_start=12,
             margin_end=12,
-            margin_top=6,
-            margin_bottom=2,
+            margin_top=3,
+            margin_bottom=3,
         )
-        header = Gtk.Label(xalign=0)
-        header.set_markup(
-            f"<b>{GLib.markup_escape_text(header_text)}</b>  "
-            f"<span alpha='55%' size='small'>{_fmt_ts(ts)}</span>"
-        )
-        body = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
-        box.append(header)
-        box.append(body)
-        self._append_row(box)
+        bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        bubble.add_css_class("bubble-mine" if is_mine else "bubble-theirs")
+        outer.append(bubble)
+        return outer, bubble
+
+    def _append_message(self, header_text: str, ts: float, text: str, is_mine: bool = False) -> None:
+        outer, bubble = self._bubble(is_mine)
+        if not is_mine:
+            sender = Gtk.Label(xalign=0)
+            sender.add_css_class("bubble-sender")
+            sender.set_markup(f"<b>{GLib.markup_escape_text(header_text)}</b>")
+            bubble.append(sender)
+        body = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        body.add_css_class("bubble-text")
+        body.set_max_width_chars(42)
+        body.set_text(text)
+        bubble.append(body)
+        stamp = Gtk.Label(xalign=1)
+        stamp.add_css_class("bubble-stamp")
+        stamp.set_markup(f"<span size='small'>{_fmt_ts(ts)}</span>")
+        bubble.append(stamp)
+        self._append_row(outer)
 
     def _append_system(self, text: str) -> None:
-        label = Gtk.Label(xalign=0.5, margin_top=4, margin_bottom=4)
-        label.set_markup(f"<span alpha='55%' size='small'>— {GLib.markup_escape_text(text)} —</span>")
-        self._append_row(label)
+        label = Gtk.Label(xalign=0.5)
+        label.add_css_class("whatsapp-system-text")
+        label.set_markup(f"<span size='small'>{GLib.markup_escape_text(text)}</span>")
+        pill = Gtk.Box(halign=Gtk.Align.CENTER, margin_top=6, margin_bottom=6)
+        pill.add_css_class("whatsapp-system-pill")
+        pill.append(label)
+        self._append_row(pill)
 
     def _append_file_received(self, meta: dict, path: Path) -> None:
-        box = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=8,
-            margin_start=12,
-            margin_end=12,
-            margin_top=4,
-            margin_bottom=4,
-        )
-        label = Gtk.Label(xalign=0, hexpand=True, wrap=True)
-        label.set_markup(
-            f"<span alpha='75%'>received '{GLib.markup_escape_text(meta['filename'])}' "
-            f"from {GLib.markup_escape_text(meta['nick'])}</span>"
-        )
+        is_mine = meta.get("nick") == self.cfg.nickname
+        outer, bubble = self._bubble(is_mine)
+        if not is_mine:
+            sender = Gtk.Label(xalign=0)
+            sender.add_css_class("bubble-sender")
+            sender.set_markup(f"<b>{GLib.markup_escape_text(meta['nick'])}</b>")
+            bubble.append(sender)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        label = Gtk.Label(xalign=0, wrap=True)
+        label.add_css_class("bubble-text")
+        label.set_markup(f"📎 {GLib.markup_escape_text(meta['filename'])}")
         open_btn = Gtk.Button(label="Open Folder")
         open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
-        box.append(label)
-        box.append(open_btn)
-        self._append_row(box)
+        row.append(label)
+        row.append(open_btn)
+        bubble.append(row)
+        self._append_row(outer)
 
     def _open_containing_folder(self, path: Path) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
 
     def _append_image(self, nick: str, path: Path) -> None:
-        box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=4,
-            margin_start=12,
-            margin_end=12,
-            margin_top=6,
-            margin_bottom=4,
-        )
-        caption = Gtk.Label(xalign=0)
-        caption.set_markup(f"<b>{GLib.markup_escape_text(nick)}</b> sent an image")
+        is_mine = nick == self.cfg.nickname
+        outer, bubble = self._bubble(is_mine)
+        if not is_mine:
+            caption = Gtk.Label(xalign=0)
+            caption.add_css_class("bubble-sender")
+            caption.set_markup(f"<b>{GLib.markup_escape_text(nick)}</b>")
+            bubble.append(caption)
         picture = Gtk.Picture.new_for_filename(str(path))
         picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         picture.set_halign(Gtk.Align.START)
@@ -227,10 +349,9 @@ class RelayWindow(Adw.ApplicationWindow):
         picture.set_can_shrink(True)
         open_btn = Gtk.Button(label="Open Folder", halign=Gtk.Align.START)
         open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
-        box.append(caption)
-        box.append(picture)
-        box.append(open_btn)
-        self._append_row(box)
+        bubble.append(picture)
+        bubble.append(open_btn)
+        self._append_row(outer)
 
     def _refresh_peer_list(self) -> None:
         self.peer_list.remove_all()
@@ -246,6 +367,7 @@ class RelayWindow(Adw.ApplicationWindow):
             dot = Gtk.Image.new_from_icon_name("user-available-symbolic")
             dot.add_css_class("success")
             label = Gtk.Label(label=data.get("nick", "?"), xalign=0)
+            label.add_css_class("bubble-text")
             row.append(dot)
             row.append(label)
             self.peer_list.append(row)
@@ -253,10 +375,11 @@ class RelayWindow(Adw.ApplicationWindow):
     # -- RelayClient callbacks (already marshalled onto the GTK thread) ----
 
     def _handle_chat(self, obj: dict) -> None:
-        self._append_message(obj["nick"], obj["ts"], obj["text"])
+        is_mine = obj.get("from") == self.cfg.device_id
+        self._append_message(obj["nick"], obj["ts"], obj["text"], is_mine=is_mine)
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
-        if obj.get("from") != self.cfg.device_id:
+        if not is_mine:
             _notify(obj["nick"], obj["text"])
             _ding()
 
