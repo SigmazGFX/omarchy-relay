@@ -24,6 +24,11 @@ RELEASES: tuple[Release, ...] = (
         items=(
             ("Expand images", "Double-click an image in the chat to see it full size. Escape closes it."),
             (
+                "Images stay in the conversation",
+                "Images, voice messages, and files now come back with the rest of the chat after a restart. "
+                "Your own pasted and snipped images are saved to your downloads folder so they can.",
+            ),
+            (
                 "Cocktails and dancers",
                 "Like /coffee: /cocktail and /dancer send one to everyone, or to one person with "
                 "/cocktail <nickname> [note].",

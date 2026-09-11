@@ -45,6 +45,8 @@ from .transfer import FileReceiver, send_file
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _AUDIO_EXTENSIONS = {".ogg", ".opus", ".oga"}
+# History kinds for file bubbles, kept by where the file is saved (see _remember_file).
+_FILE_KINDS = ("image", "voice", "file")
 _CLIPBOARD_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/tiff", "image/webp")
 
 # Consecutive messages from the same sender within this many seconds render
@@ -1067,8 +1069,10 @@ class RelayWindow(Adw.ApplicationWindow):
         self._append_row(label)
         self._last_row_was_system = True
 
-    def _append_file_received(self, meta: dict, path: Path) -> None:
-        now = time.time()
+    def _append_file_received(
+        self, meta: dict, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None, missing: bool = False
+    ) -> None:
+        ts = time.time() if ts is None else ts
         icon = Gtk.Image(icon_name="text-x-generic-symbolic", pixel_size=20, css_classes=["file-icon"])
         name = Gtk.Label(
             label=meta["filename"],
@@ -1077,30 +1081,38 @@ class RelayWindow(Adw.ApplicationWindow):
             max_width_chars=32,
             css_classes=["heading"],
         )
-        details = [GLib.format_size(meta["size"])] if meta.get("size") is not None else []
-        details.append(_fmt_time(now))
+        if missing:
+            details = ["No longer on this device"]
+        else:
+            details = [GLib.format_size(meta["size"])] if meta.get("size") is not None else []
+        details.append(_fmt_time(ts))
         info_line = Gtk.Label(label=" · ".join(details), xalign=0, css_classes=["caption", "stamp"])
         info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
         info.append(name)
         info.append(info_line)
-        open_btn = Gtk.Button(
-            icon_name="folder-open-symbolic",
-            tooltip_text="Show in folder",
-            valign=Gtk.Align.CENTER,
-            css_classes=["flat", "circular"],
-        )
-        open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
         bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
         bubble.append(icon)
         bubble.append(info)
-        bubble.append(open_btn)
-        self._append_bubble(bubble, nick=meta["nick"], ts=now, is_mine=meta.get("nick") == self.cfg.nickname)
+        if not missing:
+            open_btn = Gtk.Button(
+                icon_name="folder-open-symbolic",
+                tooltip_text="Show in folder",
+                valign=Gtk.Align.CENTER,
+                css_classes=["flat", "circular"],
+            )
+            open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
+            bubble.append(open_btn)
+        if is_mine is None:
+            is_mine = meta.get("nick") == self.cfg.nickname
+        self._append_bubble(bubble, nick=meta["nick"], ts=ts, is_mine=is_mine)
 
     def _open_containing_folder(self, path: Path) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
 
-    def _append_voice(self, meta: dict, path: Path) -> None:
-        now = time.time()
+    def _append_voice(
+        self, meta: dict, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None
+    ) -> None:
+        ts = time.time() if ts is None else ts
         play_btn = Gtk.Button(
             icon_name="media-playback-start-symbolic",
             valign=Gtk.Align.CENTER,
@@ -1138,7 +1150,9 @@ class RelayWindow(Adw.ApplicationWindow):
             play_btn.set_icon_name("media-playback-stop-symbolic")
 
         play_btn.connect("clicked", on_click)
-        self._append_bubble(bubble, nick=meta["nick"], ts=now, is_mine=meta.get("nick") == self.cfg.nickname)
+        if is_mine is None:
+            is_mine = meta.get("nick") == self.cfg.nickname
+        self._append_bubble(bubble, nick=meta["nick"], ts=ts, is_mine=is_mine)
 
     def _stop_other_voice_players(self, exclude: dict) -> None:
         for state in self._voice_players:
@@ -1149,12 +1163,16 @@ class RelayWindow(Adw.ApplicationWindow):
                 player.stop()
                 state["reset"]()
 
-    def _append_image(self, nick: str, path: Path) -> None:
-        is_mine = nick == self.cfg.nickname
+    def _append_image(
+        self, nick: str, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None
+    ) -> None:
+        ts = time.time() if ts is None else ts
+        if is_mine is None:
+            is_mine = nick == self.cfg.nickname
         try:
             texture = Gdk.Texture.new_from_filename(str(path))
         except GLib.Error:
-            self._append_file_received({"nick": nick, "filename": path.name}, path)
+            self._append_file_received({"nick": nick, "filename": path.name}, path, ts=ts, is_mine=is_mine)
             return
         scale = min(1.0, _IMAGE_MAX_WIDTH / texture.get_width(), _IMAGE_MAX_HEIGHT / texture.get_height())
         picture = Gtk.Picture(
@@ -1165,21 +1183,18 @@ class RelayWindow(Adw.ApplicationWindow):
         expand.connect("pressed", self._on_image_pressed, texture, "Your image" if is_mine else f"Image from {nick}")
         picture.add_controller(expand)
         bubble = Gtk.Overlay(child=picture, overflow=Gtk.Overflow.HIDDEN, css_classes=["bubble", "media"])
-        # Our own images are pasted from a temp file that's gone moments
-        # later, so there's no folder worth opening for those.
-        if not is_mine:
-            open_btn = Gtk.Button(
-                icon_name="folder-open-symbolic",
-                tooltip_text="Show in folder",
-                halign=Gtk.Align.END,
-                valign=Gtk.Align.END,
-                margin_end=8,
-                margin_bottom=8,
-                css_classes=["osd", "circular"],
-            )
-            open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
-            bubble.add_overlay(open_btn)
-        self._append_bubble(bubble, nick=nick, ts=time.time(), is_mine=is_mine)
+        open_btn = Gtk.Button(
+            icon_name="folder-open-symbolic",
+            tooltip_text="Show in folder",
+            halign=Gtk.Align.END,
+            valign=Gtk.Align.END,
+            margin_end=8,
+            margin_bottom=8,
+            css_classes=["osd", "circular"],
+        )
+        open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
+        bubble.add_overlay(open_btn)
+        self._append_bubble(bubble, nick=nick, ts=ts, is_mine=is_mine)
 
     def _on_image_pressed(self, _gesture, n_press: int, _x: float, _y: float, texture: Gdk.Texture, title: str) -> None:
         if n_press == 2:
@@ -1277,6 +1292,30 @@ class RelayWindow(Adw.ApplicationWindow):
         )
         self.history.prune(self.cfg.network_name, self.cfg.history_retain_count, self.cfg.history_retain_days)
 
+    def _remember_file(self, kind: str, transfer_id: str, meta: dict, path: Path) -> None:
+        """Keeps a file bubble (one of _FILE_KINDS) in history by where the file
+        is saved: received files, and our own sent images and voice messages,
+        all stay in downloads_dir."""
+        is_dm = meta.get("to", "*") != "*"
+        obj = {
+            "id": transfer_id,
+            "ts": meta.get("ts") or time.time(),
+            "from": meta["from"],
+            "nick": meta["nick"],
+            "text": path.name,
+        }
+        extra = {"path": str(path), "filename": meta.get("filename", path.name), "size": meta.get("size")}
+        if meta.get("duration") is not None:
+            extra["duration"] = meta["duration"]
+        self._remember(obj, is_dm=is_dm, peer_device_id=meta["from"] if is_dm else None, kind=kind, extra=extra)
+
+    def _remember_sent_file(self, kind: str, transfer_id: str, path: Path, **meta) -> None:
+        # Our own sends never come back through FileReceiver, so there's no
+        # received meta to keep: describe the file the same way instead.
+        own = {"from": self.cfg.device_id, "nick": self.cfg.nickname, "to": "*", "ts": time.time()}
+        own.update(filename=path.name, size=path.stat().st_size, **meta)
+        self._remember_file(kind, transfer_id, own, path)
+
     def _load_history(self) -> None:
         limit = self.cfg.history_retain_count or None
         messages = self.history.recent_messages(self.cfg.network_name, limit=limit)
@@ -1284,6 +1323,9 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         for m in messages:
             is_mine = m["from_device"] == self.cfg.device_id
+            if m["kind"] in _FILE_KINDS:
+                self._append_history_file(m, is_mine=is_mine)
+                continue
             if m["kind"] in _TREATS:
                 self._append_treat(
                     _TREATS[m["kind"]],
@@ -1309,6 +1351,25 @@ class RelayWindow(Adw.ApplicationWindow):
             )
         count = len(messages)
         self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
+
+    def _append_history_file(self, m: dict, *, is_mine: bool) -> None:
+        extra = m["extra"]
+        meta = {
+            "nick": m["nick"],
+            "filename": extra.get("filename") or m["text"],
+            "size": extra.get("size"),
+            "duration": extra.get("duration"),
+        }
+        path = Path(extra["path"]) if extra.get("path") else None
+        if path is None or not path.is_file():
+            # Deleted from downloads_dir since (or never saved): say so rather than drop it.
+            self._append_file_received(meta, path or Path(meta["filename"]), ts=m["ts"], is_mine=is_mine, missing=True)
+        elif m["kind"] == "image":
+            self._append_image(m["nick"], path, ts=m["ts"], is_mine=is_mine)
+        elif m["kind"] == "voice":
+            self._append_voice(meta, path, ts=m["ts"], is_mine=is_mine)
+        else:
+            self._append_file_received(meta, path, ts=m["ts"], is_mine=is_mine)
 
     def _handle_reaction(self, obj: dict) -> None:
         target_id, emoji, device_id = obj.get("target_id"), obj.get("emoji"), obj.get("from")
@@ -1397,14 +1458,18 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
         if meta.get("kind") == "voice" or path.suffix.lower() in _AUDIO_EXTENSIONS:
+            kind = "voice"
             GLib.idle_add(self._append_voice, meta, path)
             _notify("Voice message", f"from {meta['nick']}")
         elif path.suffix.lower() in _IMAGE_EXTENSIONS:
+            kind = "image"
             GLib.idle_add(self._append_image, meta["nick"], path)
             _notify("File received", f"{meta['filename']} from {meta['nick']}")
         else:
+            kind = "file"
             GLib.idle_add(self._append_file_received, meta, path)
             _notify("File received", f"{meta['filename']} from {meta['nick']}")
+        self._remember_file(kind, meta["transfer_id"], meta, path)
         _ding()
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
@@ -1702,8 +1767,11 @@ class RelayWindow(Adw.ApplicationWindow):
             final_path = tmp_path.with_name(f"voice-{int(time.time())}-{uuid.uuid4().hex[:6]}.ogg")
             tmp_path.rename(final_path)
             duration = round(duration, 1)
-            send_file(self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration})
-            self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path)
+            transfer_id, _chunks = send_file(
+                self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration}
+            )
+            self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path, is_mine=True)
+            self._remember_sent_file("voice", transfer_id, final_path, duration=duration)
         except Exception as exc:
             self.toast_overlay.add_toast(Adw.Toast(title=f"Couldn't send voice message: {exc}"))
             tmp_path.unlink(missing_ok=True)  # no-op via missing_ok if it was already renamed
@@ -1746,26 +1814,30 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         if texture is None:
             return
-        tmp_path = Path(tempfile.gettempdir()) / f"omarchy-relay-paste-{uuid.uuid4().hex[:8]}.png"
-        texture.save_to_png(str(tmp_path))
-        self._send_temp_image(tmp_path)
+        path = self._new_download_path("paste", ".png")
+        texture.save_to_png(str(path))
+        self._send_own_image(path)
 
-    def _send_temp_image(self, tmp_path: Path) -> None:
-        """Broadcasts an image saved to a temporary file (a paste or a snip),
-        shows it in our own chat, and deletes the file shortly after."""
+    def _new_download_path(self, prefix: str, suffix: str) -> Path:
+        downloads_dir = Path(self.cfg.downloads_dir).expanduser()
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        return downloads_dir / f"{prefix}-{int(time.time())}-{uuid.uuid4().hex[:6]}{suffix}"
+
+    def _send_own_image(self, path: Path) -> None:
+        """Broadcasts an image just saved to downloads_dir (a paste or a snip),
+        shows it in our own chat, and keeps it in history. The file stays, as
+        our own voice messages do, so history can show it after a restart."""
         try:
-            send_file(self.client, self.cfg, tmp_path, to="*")
+            transfer_id, _chunks = send_file(self.client, self.cfg, path, to="*")
         except (FileNotFoundError, ValueError) as exc:
             self._append_system(str(exc))
-            tmp_path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
             return
         # Our own broadcast files are deliberately not echoed back to us
         # (FileReceiver skips its own sender), so without this we'd never
         # see the image we just sent in our own chat.
-        self._append_image(self.cfg.nickname, tmp_path)
-        # _append_image decodes the file into a texture up front, so it's
-        # safe to clean up shortly after rather than keep it around.
-        GLib.timeout_add_seconds(5, lambda: tmp_path.unlink(missing_ok=True) or False)
+        self._append_image(self.cfg.nickname, path, is_mine=True)
+        self._remember_sent_file("image", transfer_id, path)
 
     # -- snipping ----------------------------------------------------------
 
@@ -1778,7 +1850,7 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _snip_worker(self) -> None:
         # Off the GTK thread: the picker waits on the user for as long as they take.
-        path = Path(tempfile.gettempdir()) / f"omarchy-relay-snip-{uuid.uuid4().hex[:8]}.png"
+        path = self._new_download_path("snip", ".png")
         try:
             snipped = _snip_region(path)
         except (OSError, subprocess.SubprocessError, SnipError) as exc:
@@ -1792,7 +1864,7 @@ class RelayWindow(Adw.ApplicationWindow):
         if error:
             self.toast_overlay.add_toast(Adw.Toast(title=error))
         elif path is not None:
-            self._send_temp_image(path)
+            self._send_own_image(path)
         return False
 
     # -- treats: coffee, cocktails, dancers ---------------------------------

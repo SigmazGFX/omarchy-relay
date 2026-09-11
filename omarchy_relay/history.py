@@ -43,9 +43,10 @@ class HistoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
         self._conn.executescript(_SCHEMA)
-        # kind ("text", or a treat like "coffee") and extra (JSON with whatever else that
-        # kind's renderer needs) arrived in 0.2.0. Older databases get them
-        # added in place, and their existing rows read back as plain text.
+        # kind ("text", a treat like "coffee", or a file: "image", "voice",
+        # "file") and extra (JSON with whatever else that kind's renderer
+        # needs) arrived in 0.2.0. Older databases get them added in place,
+        # and their existing rows read back as plain text.
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)")}
         if "kind" not in columns:
             self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")

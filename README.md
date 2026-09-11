@@ -240,7 +240,11 @@ app launcher brings the same window back. To actually go offline, use
 
 **Message history**: recent messages are kept locally (SQLite, under
 `~/.local/share/omarchy-relay/history.db`, scoped per network) and shown
-on startup before live traffic arrives. Settings → Chat has two
+on startup before live traffic arrives. Images, voice messages, and
+files come back too: history remembers where each one is saved in
+`transfer.downloads_dir` (your own pasted and snipped images are kept
+there, like your voice messages), and one you've since deleted shows as
+"No longer on this device". Settings → Chat has two
 independent caps — keep the last N messages, and/or keep messages for N
 days — either at 0 to not limit that dimension. Nothing here is
 transmitted; it's purely a local cache of what this device has already
