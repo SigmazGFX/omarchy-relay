@@ -227,6 +227,14 @@ plain text.
 reaction pill to add or take back your own. Reactions are kept in message
 history with the message they're on, and go when it's deleted.
 
+**Mentions and links**: `@nickname` in a message shows in bold, and a
+message that mentions you gets a highlight and a notification that stays
+on screen until you dismiss it. Tab after `@` and the start of a name
+fills in someone who's online. Web links (`https://…` and `www.…`) are
+clickable and open in your browser. There are no link previews: fetching
+one would tell the linked site your IP address, and that you're online,
+the moment the message arrived.
+
 **Replies**: the reply arrow under a message (next to the react button)
 quotes it above the message box; what you send next carries that quote at
 its top. Click a quote to jump to the original, and Esc or × cancels the

@@ -209,6 +209,14 @@ button.recording {
   opacity: 0.7;
 }
 
+/* A message that @mentions you, and links on your own accent-colored bubbles. */
+.bubble.theirs.mention {
+  box-shadow: inset 3px 0 0 var(--accent-color), 0 1px 2px var(--card-shade-color);
+}
+.bubble.mine link {
+  color: var(--accent-fg-color);
+}
+
 /* /ascii: a drawing keeps its spacing, in a box that scrolls sideways when
    it's wider than the chat. */
 .ascii-art {
@@ -647,6 +655,46 @@ def _text_extra(reply: Optional[dict], ascii_art: bool) -> Optional[dict]:
     if ascii_art:
         extra["format"] = "ascii"
     return extra or None
+
+
+# Links and @mentions in message text. A link runs to the next space, less
+# closing punctuation at its end (a full stop, or a bracket it didn't open).
+_RICH_TEXT_RE = re.compile(r"(?P<link>\b(?:https?://|www\.)[^\s<>]+)|(?P<mention>(?<![\w@])@\w[\w.-]*)", re.IGNORECASE)
+_LINK_START_RE = re.compile(r"(?:https?://|www\.)\S", re.IGNORECASE)
+_TRAILING_PUNCTUATION = ".,;:!?)]}'\"-"
+
+
+def _trim_trailing_punctuation(token: str) -> str:
+    while token and token[-1] in _TRAILING_PUNCTUATION:
+        if token[-1] == ")" and token.count("(") >= token.count(")"):
+            break  # a link's own brackets, as in a Wikipedia page name
+        token = token[:-1]
+    return token
+
+
+def _mentions(text: str, nick: str) -> bool:
+    """Whether text @mentions nick: case-insensitive, and the whole name."""
+    return bool(nick) and re.search(rf"(?<![\w@])@{re.escape(nick)}(?![\w-])", text, re.IGNORECASE) is not None
+
+
+def _message_markup(text: str) -> str:
+    """Pango markup for a text message: escaped, with web links clickable and @mentions in bold."""
+    parts, last = [], 0
+    for match in _RICH_TEXT_RE.finditer(text):
+        token = _trim_trailing_punctuation(match.group())
+        is_link = match.group("link") is not None
+        if (is_link and not _LINK_START_RE.match(token)) or (not is_link and len(token) < 2):
+            continue
+        parts.append(GLib.markup_escape_text(text[last : match.start()]))
+        escaped = GLib.markup_escape_text(token)
+        if is_link:
+            href = token if "://" in token else f"https://{token}"
+            parts.append(f'<a href="{GLib.markup_escape_text(href)}">{escaped}</a>')
+        else:
+            parts.append(f"<b>{escaped}</b>")
+        last = match.start() + len(token)
+    parts.append(GLib.markup_escape_text(text[last:]))
+    return "".join(parts)
 
 
 def _file_kind(meta: dict, path: Path) -> str:
@@ -1218,7 +1266,8 @@ class RelayWindow(Adw.ApplicationWindow):
             )
         else:
             body = Gtk.Label(
-                label=text,
+                label=_message_markup(text),
+                use_markup=True,
                 xalign=0,
                 wrap=True,
                 wrap_mode=Pango.WrapMode.WORD_CHAR,
@@ -1243,6 +1292,8 @@ class RelayWindow(Adw.ApplicationWindow):
             bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["bubble"])
             bubble.append(self._build_reply_quote(reply_to))
             bubble.append(line)
+        if not is_mine and not ascii_art and _mentions(text, self.cfg.nickname):
+            bubble.add_css_class("mention")
         if msg_id and not ascii_art:
             # Ahead of _append_bubble, whose message menu offers Edit only for these.
             self._message_texts[msg_id] = (body, stamp)
@@ -1484,7 +1535,11 @@ class RelayWindow(Adw.ApplicationWindow):
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
-            _notify(obj["nick"], obj["text"])
+            if _mentions(obj["text"], self.cfg.nickname):
+                # Stays on screen until dismissed, unlike an ordinary message's.
+                _notify(f"{obj['nick']} mentioned you", obj["text"], urgent=True)
+            else:
+                _notify(obj["nick"], obj["text"])
             _ding()
 
     def _handle_dm(self, obj: dict) -> None:
@@ -2158,6 +2213,8 @@ class RelayWindow(Adw.ApplicationWindow):
         if keyval == Gdk.KEY_Escape and (self._reply_to is not None or self._editing is not None):
             self._cancel_reply()
             return True
+        if keyval == Gdk.KEY_Tab and not state & Gdk.ModifierType.SHIFT_MASK and self._complete_mention():
+            return True
         is_paste = keyval == Gdk.KEY_v and bool(state & Gdk.ModifierType.CONTROL_MASK)
         if not is_paste:
             return False  # not our shortcut — let it through
@@ -2167,6 +2224,23 @@ class RelayWindow(Adw.ApplicationWindow):
             return False  # no image on the clipboard — fall through to normal text paste
         clipboard.read_texture_async(None, self._on_clipboard_texture_ready)
         return True  # image found: handle it ourselves, suppress the default text paste
+
+    def _complete_mention(self) -> bool:
+        """Tab after "@al" fills in the online nickname it starts. False when
+        there's nothing to complete, so Tab moves focus as usual."""
+        text, cursor = self.entry.get_text(), self.entry.get_position()
+        match = re.search(r"(?<![\w@])@([\w.-]*)$", text[:cursor])
+        if match is None:
+            return False
+        prefix = match.group(1).lower()
+        others = {data.get("nick", "") for device_id, data in self.peers.snapshot().items() if device_id != self.cfg.device_id}
+        candidates = sorted((nick for nick in others if nick and nick.lower().startswith(prefix)), key=str.lower)
+        if not candidates:
+            return False
+        completion = f"@{candidates[0]} "
+        self.entry.set_text(text[: match.start()] + completion + text[cursor:])
+        self.entry.set_position(match.start() + len(completion))
+        return True
 
     def _on_clipboard_texture_ready(self, clipboard: Gdk.Clipboard, result: Gio.AsyncResult) -> None:
         try:
@@ -2410,7 +2484,13 @@ class RelayWindow(Adw.ApplicationWindow):
         meta["edited_ts"] = ts
         meta["preview"] = text
         body, stamp = texts
-        body.set_label(text)
+        body.set_markup(_message_markup(text))
+        bubble = self._message_bubbles.get(target_id)
+        if bubble is not None and sender != self.cfg.device_id:
+            if _mentions(text, self.cfg.nickname):
+                bubble.add_css_class("mention")
+            else:
+                bubble.remove_css_class("mention")
         if _is_emoji_only(text):
             body.add_css_class("emoji-only")
         else:

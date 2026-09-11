@@ -31,6 +31,15 @@ RELEASES: tuple[Release, ...] = (
                 "Reactions stay",
                 "Reactions come back when Relay restarts, along with the messages they're on.",
             ),
+            (
+                "@mentions",
+                "A message with @yourname is highlighted and its notification stays until dismissed. Tab "
+                "after @ fills in the name of someone online.",
+            ),
+            (
+                "Clickable links",
+                "Web links in messages open in your browser.",
+            ),
         ),
     ),
     Release(

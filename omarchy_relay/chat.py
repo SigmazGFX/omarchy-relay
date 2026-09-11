@@ -42,11 +42,13 @@ def _is_quiet(obj: dict) -> bool:
     return obj.get("type") in ("edit", "delete")
 
 
-def _notify(summary: str, body: str) -> None:
+def _notify(summary: str, body: str, urgent: bool = False) -> None:
+    """urgent: stays on screen until dismissed (for a message that mentions you)."""
     if shutil.which("notify-send"):
         try:
             body = body if len(body) <= 200 else body[:197] + "..."
-            subprocess.run(["notify-send", "omarchy-relay", f"{summary}: {body}"], check=False, timeout=2)
+            urgency = ["-u", "critical"] if urgent else []
+            subprocess.run(["notify-send", *urgency, "omarchy-relay", f"{summary}: {body}"], check=False, timeout=2)
         except Exception:
             pass
 
