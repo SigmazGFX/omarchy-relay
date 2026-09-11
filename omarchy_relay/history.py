@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS reactions (
     nick TEXT NOT NULL,
     PRIMARY KEY (network, target_id, emoji, device_id)
 );
+CREATE TABLE IF NOT EXISTS receipts (
+    network TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    nick TEXT NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (network, target_id, device_id)
+);
 """
 
 
@@ -157,7 +165,7 @@ class HistoryStore:
             (network, msg_id, from_device),
         ).rowcount
         if changed:
-            self._conn.execute("DELETE FROM reactions WHERE network = ? AND target_id = ?", (network, msg_id))
+            self._forget_extras(network, msg_id)
         self._conn.commit()
 
     def hide_message(self, network: str, msg_id: str) -> None:
@@ -167,8 +175,13 @@ class HistoryStore:
             "UPDATE messages SET kind = 'hidden', text = '', extra = NULL WHERE network = ? AND id = ?",
             (network, msg_id),
         )
-        self._conn.execute("DELETE FROM reactions WHERE network = ? AND target_id = ?", (network, msg_id))
+        self._forget_extras(network, msg_id)
         self._conn.commit()
+
+    def _forget_extras(self, network: str, msg_id: str) -> None:
+        """A deleted or hidden message's reactions and receipts go with it."""
+        for table in ("reactions", "receipts"):
+            self._conn.execute(f"DELETE FROM {table} WHERE network = ? AND target_id = ?", (network, msg_id))
 
     def set_reaction(self, network: str, target_id: str, emoji: str, device_id: str, nick: str, present: bool) -> None:
         """Records one device's reaction on a message, or its removal."""
@@ -192,6 +205,23 @@ class HistoryStore:
             (network,),
         ).fetchall()
 
+    def set_receipt(self, network: str, target_id: str, device_id: str, nick: str, state: str) -> None:
+        """Records that a device has had one of our messages "delivered" or
+        "read". Read is final: a late "delivered" doesn't undo it."""
+        self._conn.execute(
+            "INSERT INTO receipts (network, target_id, device_id, nick, state) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (network, target_id, device_id) DO UPDATE SET nick = excluded.nick, state = excluded.state "
+            "WHERE receipts.state != 'read'",
+            (network, target_id, device_id, nick, state),
+        )
+        self._conn.commit()
+
+    def receipts(self, network: str) -> list[tuple[str, str, str, str]]:
+        """(target_id, device_id, nick, state) for every receipt kept on this network."""
+        return self._conn.execute(
+            "SELECT target_id, device_id, nick, state FROM receipts WHERE network = ?", (network,)
+        ).fetchall()
+
     def prune(self, network: str, retain_count: int, retain_days: float) -> None:
         """Both caps are independent and additive — a positive value on
         either dimension trims to that; 0 means unlimited on that
@@ -206,10 +236,11 @@ class HistoryStore:
                 ")",
                 (network, network, retain_count),
             )
-        self._conn.execute(
-            "DELETE FROM reactions WHERE network = ? AND target_id NOT IN (SELECT id FROM messages WHERE network = ?)",
-            (network, network),
-        )
+        for table in ("reactions", "receipts"):
+            self._conn.execute(
+                f"DELETE FROM {table} WHERE network = ? AND target_id NOT IN (SELECT id FROM messages WHERE network = ?)",
+                (network, network),
+            )
         self._conn.commit()
 
     def close(self) -> None:

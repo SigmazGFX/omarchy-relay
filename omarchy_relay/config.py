@@ -52,6 +52,9 @@ class Config:
     # Display preference: show "X is online"/"X went offline" lines in the
     # chat log. Peer list/sidebar accuracy is unaffected either way.
     show_presence: bool = True
+    # Read receipts: let a sender see when you've read their message.
+    # Delivered receipts are sent either way.
+    send_read_receipts: bool = True
     # Local message history (see history.py): shown on startup, before any
     # live traffic arrives. Either cap can be 0 for "unlimited" on that
     # dimension; both apply together when both are set.
@@ -99,6 +102,7 @@ class Config:
             agents_enabled=agents.get("enabled", False),
             agents_peers=dict(agents.get("peers", {})),
             show_presence=ui.get("show_presence", True),
+            send_read_receipts=ui.get("send_read_receipts", True),
             history_retain_count=ui.get("history_retain_count", 200),
             history_retain_days=ui.get("history_retain_days", 0),
             lock_window_size=ui.get("lock_window_size", False),
@@ -164,6 +168,7 @@ enabled = {"true" if self.agents_enabled else "false"}
 
 [ui]
 show_presence = {"true" if self.show_presence else "false"}
+send_read_receipts = {"true" if self.send_read_receipts else "false"}
 history_retain_count = {self.history_retain_count}
 history_retain_days = {self.history_retain_days}
 lock_window_size = {"true" if self.lock_window_size else "false"}

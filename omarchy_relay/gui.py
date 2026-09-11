@@ -217,6 +217,16 @@ button.recording {
   color: var(--accent-fg-color);
 }
 
+/* Receipt ticks under your own messages. */
+.receipt {
+  opacity: 0.6;
+  margin-left: 2px;
+}
+.receipt.read {
+  color: var(--accent-color);
+  opacity: 1;
+}
+
 /* /ascii: a drawing keeps its spacing, in a box that scrolls sideways when
    it's wider than the chat. */
 .ascii-art {
@@ -579,6 +589,9 @@ _BACKLOG_SETTLE_MS = 1500
 _SEARCH_LIMIT = 50
 _SEARCH_JUMP_DELAY_MS = 250
 
+# Receipts wait this long so a burst of messages is acknowledged in one go.
+_RECEIPT_FLUSH_MS = 1000
+
 # Replies quote the start of the message they answer: a preview, not a copy.
 _REPLY_PREVIEW_CHARS = 200
 
@@ -810,6 +823,12 @@ class RelayWindow(Adw.ApplicationWindow):
         self._backlog_mentions = 0
         self._backlog_timer: Optional[int] = None
         self._search_rows: dict[Gtk.ListBoxRow, str] = {}  # a search result's row -> its message id
+        # Receipts: how far our own messages got, and what we owe others for theirs.
+        self._receipts: dict[str, dict[str, tuple[str, str]]] = {}  # msg_id -> device_id -> (state, nick)
+        self._receipt_labels: dict[str, Gtk.Label] = {}  # msg_id -> the ticks under our own message
+        self._receipt_queue: dict[tuple[str, str], list[str]] = {}  # (sender, state) -> ids to acknowledge
+        self._receipt_timer: Optional[int] = None
+        self._unread: dict[str, list[str]] = {}  # sender -> ids of their messages not read yet
         self._sparkle_active = False
         self._recorder: Optional[audio.Recorder] = None
         self._recording_path: Optional[Path] = None
@@ -830,6 +849,9 @@ class RelayWindow(Adw.ApplicationWindow):
         self.connect("map", lambda *_: self._apply_window_lock())
         self.connect("notify::maximized", self._on_window_state_changed)
         self.connect("notify::fullscreened", self._on_window_state_changed)
+        # Messages waiting to be read are, once the window's in front of you.
+        self.connect("notify::is-active", lambda *_: self._catch_up_reads())
+        self.connect("notify::visible", lambda *_: self._catch_up_reads())
 
         self._install_theme()
 
@@ -1219,6 +1241,8 @@ class RelayWindow(Adw.ApplicationWindow):
         if (adjustment.get_upper(), adjustment.get_page_size()) != self._chat_extent:
             return
         self._stick_to_bottom = adjustment.get_value() >= adjustment.get_upper() - adjustment.get_page_size() - 48
+        if self._stick_to_bottom:
+            self._catch_up_reads()
 
     def _append_row(self, widget: Gtk.Widget, follow: bool = False) -> None:
         if follow:
@@ -1297,6 +1321,9 @@ class RelayWindow(Adw.ApplicationWindow):
             footer.append(self._build_message_menu(msg_id, is_mine=is_mine))
             if is_mine:
                 footer.set_halign(Gtk.Align.END)
+                receipt = Gtk.Label(label="✓", tooltip_text="Sent", valign=Gtk.Align.CENTER, css_classes=["caption", "receipt"])
+                footer.append(receipt)
+                self._receipt_labels[msg_id] = receipt
             column.append(footer)
             record["footer"] = footer
             self._message_rows[msg_id] = record
@@ -1633,6 +1660,7 @@ class RelayWindow(Adw.ApplicationWindow):
             from_device=obj.get("from"),
         )
         self._remember(obj, is_dm=False, peer_device_id=None, extra=_text_extra(reply, ascii_art))
+        self._acknowledge(obj)
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
@@ -1643,6 +1671,9 @@ class RelayWindow(Adw.ApplicationWindow):
                 self._alert(obj, obj["nick"], obj["text"])
 
     def _handle_dm(self, obj: dict) -> None:
+        if obj.get("type") == "receipt":  # only ever sent as a DM, to a message's sender
+            self._handle_receipt(obj)
+            return
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
             return
@@ -1670,6 +1701,7 @@ class RelayWindow(Adw.ApplicationWindow):
             from_device=obj.get("from"),
         )
         self._remember(obj, is_dm=True, peer_device_id=obj.get("from"), extra=_text_extra(reply, ascii_art))
+        self._acknowledge(obj)
         self._alert(obj, f"DM from {obj['nick']}", obj["text"])
 
     def _remember(
@@ -1767,6 +1799,11 @@ class RelayWindow(Adw.ApplicationWindow):
                 self._reactions.setdefault(target_id, {}).setdefault(emoji, {})[device_id] = nick
         for target_id in self._reactions:
             self._render_reactions(target_id)
+        for target_id, device_id, nick, state in self.history.receipts(self.cfg.network_name):
+            if target_id in self._receipt_labels:
+                self._receipts.setdefault(target_id, {})[device_id] = (state, nick)
+        for target_id in self._receipts:
+            self._render_receipt(target_id)
         count = len(messages)
         self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
 
@@ -1910,6 +1947,7 @@ class RelayWindow(Adw.ApplicationWindow):
             GLib.idle_add(lambda: self._append_file_received(meta, path, **message) or False)
             self._alert(meta, "File received", f"{meta['filename']} from {meta['nick']}")
         self._remember_file(kind, meta["transfer_id"], meta, path)
+        self._acknowledge(meta, msg_id=meta["transfer_id"])
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
         GLib.idle_add(self._append_system, f"Couldn't receive {meta.get('filename', 'a file')}: {msg}")
@@ -1992,6 +2030,7 @@ class RelayWindow(Adw.ApplicationWindow):
             "from": self.cfg.device_id,
             "nick": self.cfg.nickname,
             "text": text,
+            "receipts": True,  # asks whoever gets it to say when it's delivered and read
         }
         if ascii_art:
             payload["format"] = "ascii"
@@ -2268,7 +2307,7 @@ class RelayWindow(Adw.ApplicationWindow):
             tmp_path.rename(final_path)
             duration = round(duration, 1)
             transfer_id, _chunks = send_file(
-                self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration}
+                self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration, "receipts": True}
             )
             self._append_voice(
                 {"nick": self.cfg.nickname, "duration": duration}, final_path, is_mine=True, msg_id=transfer_id
@@ -2292,7 +2331,7 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         path = Path(gfile.get_path())
         try:
-            transfer_id, _chunks = send_file(self.client, self.cfg, path, to="*")
+            transfer_id, _chunks = send_file(self.client, self.cfg, path, to="*", extra_meta={"receipts": True})
         except (FileNotFoundError, ValueError) as exc:
             self._append_system(str(exc))
             return
@@ -2363,7 +2402,7 @@ class RelayWindow(Adw.ApplicationWindow):
         shows it in our own chat, and keeps it in history. The file stays, as
         our own voice messages do, so history can show it after a restart."""
         try:
-            transfer_id, _chunks = send_file(self.client, self.cfg, path, to="*")
+            transfer_id, _chunks = send_file(self.client, self.cfg, path, to="*", extra_meta={"receipts": True})
         except (FileNotFoundError, ValueError) as exc:
             self._append_system(str(exc))
             path.unlink(missing_ok=True)
@@ -2466,6 +2505,98 @@ class RelayWindow(Adw.ApplicationWindow):
         adjustment.set_value(max(0.0, min(centered, adjustment.get_upper() - adjustment.get_page_size())))
         bubble.add_css_class("flash")
         GLib.timeout_add(900, lambda: bubble.remove_css_class("flash") or False)
+
+    # -- receipts ------------------------------------------------------------
+
+    def _reading(self) -> bool:
+        """Whether new messages are in front of you: the window shown and
+        focused, the chat scrolled to the bottom, and no search covering it."""
+        return (
+            self.get_visible()
+            and self.is_active()
+            and self._stick_to_bottom
+            and not self.search_bar.get_search_mode()
+        )
+
+    def _acknowledge(self, obj: dict, msg_id: Optional[str] = None) -> None:
+        """Receipts for someone else's message that asked for them: delivered
+        straight away, and read once it's been in front of you, unless read
+        receipts are turned off."""
+        sender, msg_id = obj.get("from"), msg_id or obj.get("id")
+        if not obj.get("receipts") or not sender or sender == self.cfg.device_id or not msg_id:
+            return
+        self._queue_receipt(sender, "delivered", msg_id)
+        if not self.cfg.send_read_receipts:
+            return
+        if self._reading():
+            self._queue_receipt(sender, "read", msg_id)
+        else:
+            self._unread.setdefault(sender, []).append(msg_id)
+
+    def _catch_up_reads(self) -> None:
+        if self._unread and self.cfg.send_read_receipts and self._reading():
+            unread, self._unread = self._unread, {}
+            for sender, ids in unread.items():
+                for msg_id in ids:
+                    self._queue_receipt(sender, "read", msg_id)
+
+    def _queue_receipt(self, sender: str, state: str, msg_id: str) -> None:
+        # Batched, so a burst of messages (or a backlog) is one receipt per sender.
+        self._receipt_queue.setdefault((sender, state), []).append(msg_id)
+        if self._receipt_timer is None:
+            self._receipt_timer = GLib.timeout_add(_RECEIPT_FLUSH_MS, self._flush_receipts)
+
+    def _flush_receipts(self) -> bool:
+        queue, self._receipt_queue, self._receipt_timer = self._receipt_queue, {}, None
+        for (sender, state), ids in queue.items():
+            self.client.send_dm(
+                sender,
+                {
+                    "type": "receipt",
+                    "id": uuid.uuid4().hex,
+                    "ts": time.time(),
+                    "from": self.cfg.device_id,
+                    "nick": self.cfg.nickname,
+                    "state": state,
+                    "target_ids": ids,
+                },
+            )
+        return False
+
+    def _handle_receipt(self, obj: dict) -> None:
+        sender, state, ids = obj.get("from"), obj.get("state"), obj.get("target_ids")
+        if not sender or state not in ("delivered", "read") or not isinstance(ids, list):
+            return
+        nick = obj.get("nick", "?")
+        for msg_id in ids:
+            meta = self._message_meta.get(msg_id) if isinstance(msg_id, str) else None
+            if meta is None or meta["from_device"] != self.cfg.device_id:
+                continue  # receipts only count on our own messages
+            by_device = self._receipts.setdefault(msg_id, {})
+            if by_device.get(sender, ("",))[0] == "read":
+                continue  # read is final: a late "delivered" doesn't undo it
+            by_device[sender] = (state, nick)
+            self.history.set_receipt(self.cfg.network_name, msg_id, sender, nick, state)
+            self._render_receipt(msg_id)
+
+    def _render_receipt(self, msg_id: str) -> None:
+        label = self._receipt_labels.get(msg_id)
+        if label is None:
+            return
+        by_device = self._receipts.get(msg_id, {})
+        read = sorted(nick for state, nick in by_device.values() if state == "read")
+        delivered = sorted(nick for state, nick in by_device.values() if state == "delivered")
+        lines = []
+        if read:
+            lines.append(f"Read by {', '.join(read)}")
+        if delivered:
+            lines.append(f"Delivered to {', '.join(delivered)}")
+        label.set_label("✓✓" if lines else "✓")
+        label.set_tooltip_text("\n".join(lines) or "Sent")
+        if read:
+            label.add_css_class("read")
+        else:
+            label.remove_css_class("read")
 
     # -- search --------------------------------------------------------------
 
@@ -2659,7 +2790,15 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _forget_message(self, msg_id: str) -> None:
         """Drops what lets a message be reacted to, replied to, edited, or deleted."""
-        for state in (self._message_meta, self._message_rows, self._message_texts, self._reaction_slots, self._reactions):
+        for state in (
+            self._message_meta,
+            self._message_rows,
+            self._message_texts,
+            self._reaction_slots,
+            self._reactions,
+            self._receipts,
+            self._receipt_labels,
+        ):
             state.pop(msg_id, None)
         voice = self._voice_by_message.pop(msg_id, None)
         if voice is not None:
@@ -2774,6 +2913,7 @@ class RelayWindow(Adw.ApplicationWindow):
             "note": note,
             # What older clients, and the terminal chat/TUI, show instead.
             "text": f"{fallback}: {note}" if note else fallback,
+            "receipts": True,
         }
         if target_device_id:
             self.client.send_dm(target_device_id, payload)
@@ -2803,6 +2943,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._remember(
             obj, is_dm=is_dm, peer_device_id=peer_device_id, kind=treat.kind, extra={"to_nick": to_nick, "note": note}
         )
+        self._acknowledge(obj)
         if not self.client.is_backlog(obj):
             self._play_treat(treat)
         if not is_mine:
@@ -3126,6 +3267,12 @@ class RelayWindow(Adw.ApplicationWindow):
         )
         presence_row.set_active(self.cfg.show_presence)
         chat_group.add(presence_row)
+        read_receipts_row = Adw.SwitchRow(
+            title="Send read receipts",
+            subtitle="Let senders see when you've read their messages — delivered receipts are sent either way",
+        )
+        read_receipts_row.set_active(self.cfg.send_read_receipts)
+        chat_group.add(read_receipts_row)
         history_count_row = Adw.SpinRow.new_with_range(0, 10000, 10)
         history_count_row.set_title("Keep last N messages")
         history_count_row.set_subtitle("Shown again on startup — 0 = don't limit by count")
@@ -3204,6 +3351,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 broker_username=username_row.get_text().strip(),
                 broker_password=password_row.get_text(),
                 show_presence=presence_row.get_active(),
+                send_read_receipts=read_receipts_row.get_active(),
                 history_retain_count=int(history_count_row.get_value()),
                 history_retain_days=history_days_row.get_value(),
                 lock_window_size=lock_row.get_active(),

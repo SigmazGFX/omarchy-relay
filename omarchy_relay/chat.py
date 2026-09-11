@@ -169,6 +169,8 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
             on_edit(obj)
         elif kind == "delete":
             on_delete(obj)
+        elif kind == "receipt":
+            return  # the GUI's delivered/read ticks: nothing to print
         else:
             on_text(obj, is_dm=is_dm)
 

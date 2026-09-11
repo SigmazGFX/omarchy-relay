@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.15.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Delivered and read",
+                "Ticks under your messages show when they've been delivered and read; hover for who. "
+                "Settings → Chat can stop telling others when you've read theirs.",
+            ),
+        ),
+    ),
+    Release(
         version="0.14.0",
         date="2026-09-11",
         items=(

@@ -260,6 +260,15 @@ or press Enter for the newest, to jump to it in the chat. `omarchy-relay
 search <text>` does the same from a terminal. Deleted messages don't turn
 up.
 
+**Read receipts**: ticks under your own messages show how far they got: ✓
+sent, ✓✓ delivered to at least one device, and ✓✓ in your accent color once
+someone has read it (it counts as read when their window is focused and
+scrolled down to it). Hover for who. Settings → Chat → "Send read receipts"
+stops telling others when you've read theirs; delivered receipts still go.
+A receipt goes only to the message's sender, as a direct message, and only
+for messages sent from this version on; `chat`, `chat --tui`, and older
+clients don't send them.
+
 **Replies**: the reply arrow under a message (next to the react button)
 quotes it above the message box; what you send next carries that quote at
 its top. Click a quote to jump to the original, and Esc or × cancels the
