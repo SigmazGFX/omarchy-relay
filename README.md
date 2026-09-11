@@ -230,6 +230,20 @@ reply. A reply to a direct message goes back to that person only. Replies
 are kept in message history; `chat` and `chat --tui` mark them "(reply to
 Alice)", and older clients show them as ordinary messages.
 
+**Edit and delete**: the ⋯ button under a message (after the reply arrow)
+has **Edit** and **Delete for everyone** on your own messages, and **Delete
+for me** on anyone's. Edit works on text messages (not drawings); the new
+text replaces the old wherever the message went, marked "edited" by its
+time. A message deleted for everyone leaves "This message was deleted" in
+its place, in history too, with its text gone; one deleted for you just
+disappears from your chat and history. Quotes of it in replies keep what
+they quoted. Only the device that sent a message can edit or delete it for
+everyone — though, as with DMs, that device is claimed rather than proven,
+so anyone holding the network passphrase could pose as it. `chat`, `chat
+--tui`, and older clients show an edit as a new "(edited) …" message and a
+delete as "(deleted a message)". Files, images, and voice messages have no
+⋯ button yet.
+
 **Coffee, cocktails, and dancers**: `/coffee`, `/cocktail`, and `/dancer`
 send one to everyone, and `/coffee <nickname> [note]` (likewise
 `/cocktail` and `/dancer`) sends one to one person — the commands are the

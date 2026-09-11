@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.10.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Edit and delete messages",
+                "The ⋯ button under a message edits your own or deletes it for everyone, and deletes anyone's "
+                "from just your chat.",
+            ),
+        ),
+    ),
+    Release(
         version="0.9.1",
         date="2026-09-11",
         items=(

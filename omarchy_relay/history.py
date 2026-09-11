@@ -81,13 +81,13 @@ class HistoryStore:
         columns = "id, ts, from_device, nick, text, is_dm, peer_device_id, kind, extra"
         if limit:
             rows = self._conn.execute(
-                f"SELECT {columns} FROM messages WHERE network = ? ORDER BY ts DESC LIMIT ?",
+                f"SELECT {columns} FROM messages WHERE network = ? AND kind != 'hidden' ORDER BY ts DESC LIMIT ?",
                 (network, limit),
             ).fetchall()
             rows.reverse()
         else:
             rows = self._conn.execute(
-                f"SELECT {columns} FROM messages WHERE network = ? ORDER BY ts ASC",
+                f"SELECT {columns} FROM messages WHERE network = ? AND kind != 'hidden' ORDER BY ts ASC",
                 (network,),
             ).fetchall()
         return [
@@ -104,6 +104,43 @@ class HistoryStore:
             }
             for r in rows
         ]
+
+    def edit_message(self, network: str, msg_id: str, from_device: str, text: str) -> None:
+        """Replaces a text message's text and marks it edited. Only a row
+        sent by from_device changes."""
+        row = self._conn.execute(
+            "SELECT extra FROM messages WHERE network = ? AND id = ? AND from_device = ? AND kind = 'text'",
+            (network, msg_id, from_device),
+        ).fetchone()
+        if row is None:
+            return
+        extra = json.loads(row[0]) if row[0] else {}
+        extra["edited"] = True
+        self._conn.execute(
+            "UPDATE messages SET text = ?, extra = ? WHERE network = ? AND id = ?",
+            (text, json.dumps(extra), network, msg_id),
+        )
+        self._conn.commit()
+
+    def mark_deleted(self, network: str, msg_id: str, from_device: str) -> None:
+        """Deleted for everyone: the row stays, as kind "deleted", to show a
+        marker where the message was, but its content is gone. Only a row
+        sent by from_device changes."""
+        self._conn.execute(
+            "UPDATE messages SET kind = 'deleted', text = '', extra = NULL "
+            "WHERE network = ? AND id = ? AND from_device = ?",
+            (network, msg_id, from_device),
+        )
+        self._conn.commit()
+
+    def hide_message(self, network: str, msg_id: str) -> None:
+        """Deleted for me: the row stays, as kind "hidden", so a redelivered
+        copy isn't stored again, but its content is gone and it never loads."""
+        self._conn.execute(
+            "UPDATE messages SET kind = 'hidden', text = '', extra = NULL WHERE network = ? AND id = ?",
+            (network, msg_id),
+        )
+        self._conn.commit()
 
     def prune(self, network: str, retain_count: int, retain_days: float) -> None:
         """Both caps are independent and additive — a positive value on

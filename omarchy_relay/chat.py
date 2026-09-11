@@ -37,6 +37,11 @@ def _reply_prefix(obj: dict) -> str:
     return f"(reply to {ref.get('nick') or '?'}) " if isinstance(ref, dict) else ""
 
 
+def _is_quiet(obj: dict) -> bool:
+    """An edit or delete of an earlier GUI message: logged as its fallback text, without a notification."""
+    return obj.get("type") in ("edit", "delete")
+
+
 def _notify(summary: str, body: str) -> None:
     if shutil.which("notify-send"):
         try:
@@ -67,14 +72,15 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
         print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {_reply_prefix(obj)}{obj['text']}")
         # Broadcasts echo back to the sender too (we're subscribed to our own
         # publish topic) — don't pop a notification/sound for our own messages.
-        if obj.get("from") != cfg.device_id:
+        if obj.get("from") != cfg.device_id and not _is_quiet(obj):
             _notify(obj["nick"], obj["text"])
             _ding()
 
     def on_dm(obj):
         print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {_reply_prefix(obj)}{obj['text']}")
-        _notify(f"DM from {obj['nick']}", obj["text"])
-        _ding()
+        if not _is_quiet(obj):
+            _notify(f"DM from {obj['nick']}", obj["text"])
+            _ding()
 
     def on_presence(device_id, data):
         changed, previous = peers.update(device_id, data)

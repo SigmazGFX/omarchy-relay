@@ -197,6 +197,18 @@ button.recording {
   box-shadow: 0 0 0 3px var(--accent-color);
 }
 
+/* A message deleted for everyone leaves a marker in its place. */
+.bubble.deleted {
+  background-color: transparent;
+  color: var(--window-fg-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent);
+  font-style: italic;
+}
+.bubble.deleted > label:not(.stamp),
+.bubble.deleted > image {
+  opacity: 0.7;
+}
+
 /* /ascii: a drawing keeps its spacing, in a box that scrolls sideways when
    it's wider than the chat. */
 .ascii-art {
@@ -637,6 +649,10 @@ def _text_extra(reply: Optional[dict], ascii_art: bool) -> Optional[dict]:
     return extra or None
 
 
+def _mark_edited(stamp: Gtk.Label, ts: float) -> None:
+    stamp.set_label(f"edited · {_fmt_time(ts)}")
+
+
 def _is_emoji_only(text: str, max_len: int = 12) -> bool:
     """A short WhatsApp/iMessage-style check: render standalone emoji (with
     no other text) larger in the bubble. max_len caps it so someone can't
@@ -700,10 +716,16 @@ class RelayWindow(Adw.ApplicationWindow):
 
         # Reactions, keyed by message id — session-only, like the rest of the
         # chat log (nothing here is persisted to disk).
-        self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id", "nick", "preview"}
+        self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id", "nick", "preview", "from_device", "ts"}
         self._message_bubbles: dict[str, Gtk.Widget] = {}  # msg_id -> its bubble, for replies to jump to
         self._reaction_slots: dict[str, Gtk.Box] = {}  # msg_id -> its reaction-pills row
         self._reactions: dict[str, dict[str, dict[str, str]]] = {}  # msg_id -> emoji -> device_id -> nick
+        # Editing and deleting: every bubble's row pieces, so a removed row's
+        # neighbours can regroup, and the labels of text messages an edit rewrites.
+        self._bubble_rows: dict[Gtk.Widget, dict] = {}  # row -> {"row", "column", "bubble", "footer", "head"}
+        self._message_rows: dict[str, dict] = {}  # msg_id -> the same record, while the message can still be changed
+        self._message_texts: dict[str, tuple[Gtk.Label, Gtk.Label]] = {}  # msg_id -> (text, time stamp)
+        self._editing: Optional[str] = None  # id of our own message being edited in the composer
         self._sparkle_active = False
         self._recorder: Optional[audio.Recorder] = None
         self._recording_path: Optional[Path] = None
@@ -936,7 +958,7 @@ class RelayWindow(Adw.ApplicationWindow):
         labels.append(self.reply_preview)
         cancel_btn = Gtk.Button(
             icon_name="window-close-symbolic",
-            tooltip_text="Cancel reply (Esc)",
+            tooltip_text="Cancel (Esc)",
             valign=Gtk.Align.CENTER,
             css_classes=["flat", "circular"],
         )
@@ -1098,6 +1120,7 @@ class RelayWindow(Adw.ApplicationWindow):
         msg_id: Optional[str] = None,
         dm_peer_device_id: Optional[str] = None,
         preview: str = "",
+        from_device: Optional[str] = None,
     ) -> None:
         """Places a bubble on its side of the chat, folding it into the
         previous message's group when it's the same sender shortly after."""
@@ -1113,6 +1136,7 @@ class RelayWindow(Adw.ApplicationWindow):
 
         row = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=2 if joined else 10)
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        head = None  # the avatar and name that start a group of someone else's messages
         if is_mine:
             row.set_halign(Gtk.Align.END)
             row.set_margin_start(72)
@@ -1122,19 +1146,24 @@ class RelayWindow(Adw.ApplicationWindow):
             if joined:
                 row.append(Gtk.Box(width_request=32))  # keeps the bubble under the group's avatar
             else:
-                row.append(Adw.Avatar(size=32, text=nick, show_initials=True, valign=Gtk.Align.START))
+                avatar = Adw.Avatar(size=32, text=nick, show_initials=True, valign=Gtk.Align.START)
+                row.append(avatar)
                 sender = Gtk.Box(spacing=6)
                 sender.append(Gtk.Label(label=nick, xalign=0, css_classes=["caption-heading", _nick_color_class(nick)]))
                 if is_dm:
                     sender.append(Gtk.Label(label="Direct message", css_classes=["caption", "dm-tag"]))
                 column.append(sender)
+                head = (avatar, sender)
         column.append(bubble)
+        record = {"row": row, "column": column, "bubble": bubble, "footer": None, "head": head}
         if msg_id:
             self._message_meta[msg_id] = {
                 "is_dm": is_dm,
                 "peer_device_id": dm_peer_device_id,
                 "nick": nick,
                 "preview": preview,
+                "from_device": self.cfg.device_id if is_mine else from_device,
+                "ts": ts,
             }
             self._message_bubbles[msg_id] = bubble
             reactions_row = Gtk.Box(spacing=4, css_classes=["reactions-row"])
@@ -1143,10 +1172,14 @@ class RelayWindow(Adw.ApplicationWindow):
             footer.append(reactions_row)
             footer.append(self._build_react_button(msg_id))
             footer.append(self._build_reply_button(msg_id))
+            footer.append(self._build_message_menu(msg_id, is_mine=is_mine))
             if is_mine:
                 footer.set_halign(Gtk.Align.END)
             column.append(footer)
+            record["footer"] = footer
+            self._message_rows[msg_id] = record
         row.append(column)
+        self._bubble_rows[row] = record
         self._append_row(row, follow=is_mine)
 
     def _append_text(
@@ -1161,6 +1194,8 @@ class RelayWindow(Adw.ApplicationWindow):
         is_history: bool = False,
         reply_to: Optional[dict] = None,
         ascii_art: bool = False,
+        from_device: Optional[str] = None,
+        edited: bool = False,
     ) -> None:
         if ascii_art:
             art = Gtk.Label(label=text, xalign=0, selectable=True, css_classes=["ascii-art"])
@@ -1190,6 +1225,8 @@ class RelayWindow(Adw.ApplicationWindow):
                 body.add_css_class("emoji-only")
         stamp = self._stamp(ts)
         stamp.set_valign(Gtk.Align.END)
+        if edited:
+            _mark_edited(stamp, ts)
         line = Gtk.Box(spacing=10, css_classes=[] if reply_to else ["bubble"])
         line.append(body)
         line.append(stamp)
@@ -1198,6 +1235,9 @@ class RelayWindow(Adw.ApplicationWindow):
             bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["bubble"])
             bubble.append(self._build_reply_quote(reply_to))
             bubble.append(line)
+        if msg_id and not ascii_art:
+            # Ahead of _append_bubble, whose message menu offers Edit only for these.
+            self._message_texts[msg_id] = (body, stamp)
         self._append_bubble(
             bubble,
             nick=nick,
@@ -1207,6 +1247,7 @@ class RelayWindow(Adw.ApplicationWindow):
             msg_id=msg_id,
             dm_peer_device_id=dm_peer_device_id,
             preview=text,
+            from_device=from_device,
         )
         if not is_history and _SPARKLE_TRIGGER in text.lower():
             self._play_sparkles()
@@ -1397,6 +1438,12 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
             return
+        if obj.get("type") == "edit":
+            self._handle_edit(obj)
+            return
+        if obj.get("type") == "delete":
+            self._handle_delete(obj)
+            return
         if obj.get("type") in _TREATS:
             self._handle_treat(_TREATS[obj["type"]], obj, is_dm=False)
             return
@@ -1404,7 +1451,14 @@ class RelayWindow(Adw.ApplicationWindow):
         is_mine = obj.get("from") == self.cfg.device_id
         reply, ascii_art = _reply_ref(obj), obj.get("format") == "ascii"
         self._append_text(
-            obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine, reply_to=reply, ascii_art=ascii_art
+            obj["nick"],
+            obj["ts"],
+            obj["text"],
+            msg_id=obj.get("id"),
+            is_mine=is_mine,
+            reply_to=reply,
+            ascii_art=ascii_art,
+            from_device=obj.get("from"),
         )
         self._remember(obj, is_dm=False, peer_device_id=None, extra=_text_extra(reply, ascii_art))
         # Broadcasts echo back to the sender too (we're subscribed to our
@@ -1416,6 +1470,12 @@ class RelayWindow(Adw.ApplicationWindow):
     def _handle_dm(self, obj: dict) -> None:
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
+            return
+        if obj.get("type") == "edit":
+            self._handle_edit(obj)
+            return
+        if obj.get("type") == "delete":
+            self._handle_delete(obj)
             return
         if obj.get("type") in _TREATS:
             self._handle_treat(_TREATS[obj["type"]], obj, is_dm=True)
@@ -1430,6 +1490,7 @@ class RelayWindow(Adw.ApplicationWindow):
             dm_peer_device_id=obj.get("from"),
             reply_to=reply,
             ascii_art=ascii_art,
+            from_device=obj.get("from"),
         )
         self._remember(obj, is_dm=True, peer_device_id=obj.get("from"), extra=_text_extra(reply, ascii_art))
         _notify(f"DM from {obj['nick']}", obj["text"])
@@ -1491,6 +1552,9 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         for m in messages:
             is_mine = m["from_device"] == self.cfg.device_id
+            if m["kind"] == "deleted":
+                self._append_deleted(m, is_mine=is_mine)
+                continue
             if m["kind"] in _FILE_KINDS:
                 self._append_history_file(m, is_mine=is_mine)
                 continue
@@ -1505,6 +1569,7 @@ class RelayWindow(Adw.ApplicationWindow):
                     is_mine=is_mine,
                     is_dm=m["is_dm"],
                     dm_peer_device_id=m["peer_device_id"],
+                    from_device=m["from_device"],
                 )
                 continue
             self._append_text(
@@ -1518,6 +1583,8 @@ class RelayWindow(Adw.ApplicationWindow):
                 is_history=True,
                 reply_to=_reply_ref(m["extra"]),
                 ascii_art=m["extra"].get("format") == "ascii",
+                from_device=m["from_device"],
+                edited=bool(m["extra"].get("edited")),
             )
         count = len(messages)
         self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
@@ -1685,6 +1752,10 @@ class RelayWindow(Adw.ApplicationWindow):
         if not text:
             return
         self.entry.set_text("")
+        if self._editing is not None:
+            # An edit is the new text as typed, commands and all.
+            self._send_edit(self._editing, text)
+            return
         if text.split(maxsplit=1)[0] == "/ascii":
             # Ahead of the hint cleanup below, which would eat into a pasted drawing's spacing.
             self._handle_ascii_command(_ascii_drawing(raw))
@@ -2029,7 +2100,7 @@ class RelayWindow(Adw.ApplicationWindow):
             self._append_system(str(exc))
 
     def _on_entry_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
-        if keyval == Gdk.KEY_Escape and self._reply_to is not None:
+        if keyval == Gdk.KEY_Escape and (self._reply_to is not None or self._editing is not None):
             self._cancel_reply()
             return True
         is_paste = keyval == Gdk.KEY_v and bool(state & Gdk.ModifierType.CONTROL_MASK)
@@ -2139,6 +2210,7 @@ class RelayWindow(Adw.ApplicationWindow):
         meta = self._message_meta.get(msg_id)
         if meta is None:
             return
+        self._cancel_reply()  # an edit in progress gives way to the reply
         self._reply_to = {"id": msg_id, **meta}
         privately = " privately" if meta["is_dm"] else ""
         self.reply_title.set_label(f"Replying{privately} to {meta['nick']}")
@@ -2147,6 +2219,11 @@ class RelayWindow(Adw.ApplicationWindow):
         self.entry.grab_focus()
 
     def _cancel_reply(self) -> None:
+        """Closes the bar above the composer, for a reply or an edit alike.
+        A cancelled edit takes its text back out of the composer."""
+        if self._editing is not None:
+            self._editing = None
+            self.entry.set_text("")
         self._reply_to = None
         self.reply_revealer.set_reveal_child(False)
 
@@ -2161,6 +2238,217 @@ class RelayWindow(Adw.ApplicationWindow):
         adjustment.set_value(max(0.0, min(centered, adjustment.get_upper() - adjustment.get_page_size())))
         bubble.add_css_class("flash")
         GLib.timeout_add(900, lambda: bubble.remove_css_class("flash") or False)
+
+    # -- editing and deleting ----------------------------------------------
+
+    def _build_message_menu(self, msg_id: str, *, is_mine: bool) -> Gtk.MenuButton:
+        items = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6
+        )
+        choices = []
+        if is_mine and msg_id in self._message_texts:
+            choices.append(("Edit", False, self._start_edit))
+        if is_mine:
+            choices.append(("Delete for everyone", True, self._delete_for_everyone))
+        choices.append(("Delete for me", True, self._delete_for_me))
+        for label, destructive, action in choices:
+            item = Gtk.Button(
+                child=Gtk.Label(label=label, xalign=0, css_classes=["error"] if destructive else []),
+                css_classes=["flat"],
+            )
+            item.connect("clicked", self._on_message_menu_item, msg_id, action)
+            items.append(item)
+        return Gtk.MenuButton(
+            icon_name="view-more-symbolic",
+            tooltip_text="More",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular", "react-btn"],
+            popover=Gtk.Popover(child=items),
+        )
+
+    def _on_message_menu_item(self, button: Gtk.Button, msg_id: str, action) -> None:
+        button.get_ancestor(Gtk.Popover).popdown()
+        # Deleting takes this menu's own button out of the chat, so not from inside its click.
+        GLib.idle_add(lambda: action(msg_id) or False)
+
+    def _start_edit(self, msg_id: str) -> None:
+        texts = self._message_texts.get(msg_id)
+        if texts is None:
+            return
+        self._cancel_reply()
+        self._editing = msg_id
+        current = texts[0].get_text()
+        self.reply_title.set_label("Editing message")
+        self.reply_preview.set_label(" ".join(current.split()))
+        self.reply_revealer.set_reveal_child(True)
+        self.entry.set_text(current)
+        self.entry.grab_focus()
+        self.entry.set_position(-1)
+
+    def _send_edit(self, msg_id: str, text: str) -> None:
+        meta, texts = self._message_meta.get(msg_id), self._message_texts.get(msg_id)
+        if meta is None or texts is None:
+            self._cancel_reply()
+            self.toast_overlay.add_toast(Adw.Toast(title="That message isn't in this chat anymore"))
+            return
+        if not self.client.connected.is_set():
+            self.entry.set_text(text)  # still editing: nothing's lost
+            self.toast_overlay.add_toast(Adw.Toast(title="Not connected — the edit will have to wait"))
+            return
+        self._cancel_reply()
+        if text == texts[0].get_text():
+            return
+        payload = self._message_change("edit", msg_id)
+        payload["new_text"] = text
+        payload["text"] = f"(edited) {text}"
+        self._send_message_change(meta, payload)
+        self._handle_edit(payload)
+
+    def _delete_for_everyone(self, msg_id: str) -> None:
+        meta = self._message_meta.get(msg_id)
+        if meta is None:
+            return
+        if not self.client.connected.is_set():
+            self.toast_overlay.add_toast(Adw.Toast(title="Not connected — the message can't be deleted for everyone yet"))
+            return
+        payload = self._message_change("delete", msg_id)
+        payload["text"] = "(deleted a message)"
+        self._send_message_change(meta, payload)
+        self._handle_delete(payload)
+
+    def _delete_for_me(self, msg_id: str) -> None:
+        if msg_id not in self._message_meta:
+            return
+        self.history.hide_message(self.cfg.network_name, msg_id)
+        self._remove_message_row(msg_id)
+
+    def _message_change(self, kind: str, msg_id: str) -> dict:
+        """An edit or delete of one of our messages. Its "text" is what older
+        clients, and the terminal chat/TUI, show instead."""
+        return {
+            "type": kind,
+            "id": uuid.uuid4().hex,
+            "ts": time.time(),
+            "from": self.cfg.device_id,
+            "nick": self.cfg.nickname,
+            "target_id": msg_id,
+        }
+
+    def _send_message_change(self, meta: dict, payload: dict) -> None:
+        # Goes wherever the message went, so a direct message's edit stays private.
+        # Applied here straight away; a broadcast's echo then finds nothing left to do.
+        if meta["is_dm"] and meta["peer_device_id"]:
+            self.client.send_dm(meta["peer_device_id"], payload)
+        else:
+            self.client.send_chat(payload)
+
+    def _handle_edit(self, obj: dict) -> None:
+        target_id, sender, text, ts = obj.get("target_id"), obj.get("from"), obj.get("new_text"), obj.get("ts")
+        meta, texts = self._message_meta.get(target_id), self._message_texts.get(target_id)
+        # Only the device that sent a text message can edit it.
+        if meta is None or texts is None or not sender or meta["from_device"] != sender:
+            return
+        if not isinstance(text, str) or not text.strip() or not isinstance(ts, (int, float)):
+            return
+        if ts <= meta.get("edited_ts", 0.0):
+            return  # our own edit echoing back, or an older edit arriving late
+        meta["edited_ts"] = ts
+        meta["preview"] = text
+        body, stamp = texts
+        body.set_label(text)
+        if _is_emoji_only(text):
+            body.add_css_class("emoji-only")
+        else:
+            body.remove_css_class("emoji-only")
+        _mark_edited(stamp, meta["ts"])
+        self.history.edit_message(self.cfg.network_name, target_id, sender, text)
+
+    def _handle_delete(self, obj: dict) -> None:
+        target_id, sender = obj.get("target_id"), obj.get("from")
+        meta = self._message_meta.get(target_id)
+        # Only the device that sent a message can delete it for everyone.
+        if meta is None or not sender or meta["from_device"] != sender:
+            return
+        self.history.mark_deleted(self.cfg.network_name, target_id, sender)
+        self._show_deleted(target_id)
+
+    def _forget_message(self, msg_id: str) -> None:
+        """Drops what lets a message be reacted to, replied to, edited, or deleted."""
+        for state in (self._message_meta, self._message_rows, self._message_texts, self._reaction_slots, self._reactions):
+            state.pop(msg_id, None)
+        if self._editing == msg_id or (self._reply_to or {}).get("id") == msg_id:
+            self._cancel_reply()
+
+    def _deleted_bubble(self, ts: float, *, is_mine: bool) -> Gtk.Widget:
+        bubble = Gtk.Box(spacing=10, css_classes=["bubble", "deleted"])
+        bubble.append(Gtk.Image(icon_name="action-unavailable-symbolic", valign=Gtk.Align.CENTER))
+        bubble.append(
+            Gtk.Label(label="You deleted this message" if is_mine else "This message was deleted", xalign=0, hexpand=True)
+        )
+        stamp = self._stamp(ts)
+        stamp.set_valign(Gtk.Align.END)
+        bubble.append(stamp)
+        return bubble
+
+    def _append_deleted(self, m: dict, *, is_mine: bool) -> None:
+        bubble = self._deleted_bubble(m["ts"], is_mine=is_mine)
+        self._append_bubble(bubble, nick=m["nick"], ts=m["ts"], is_mine=is_mine, is_dm=m["is_dm"])
+        self._message_bubbles[m["id"]] = bubble  # replies' quotes still jump to where it was
+
+    def _show_deleted(self, msg_id: str) -> None:
+        """Deleted for everyone: a marker takes the message's place in the conversation."""
+        meta, record, old = self._message_meta.get(msg_id), self._message_rows.get(msg_id), self._message_bubbles.get(msg_id)
+        self._forget_message(msg_id)
+        if meta is None or record is None or old is None:
+            return
+        new = self._deleted_bubble(meta["ts"], is_mine=meta["from_device"] == self.cfg.device_id)
+        for css_class in ("mine", "theirs", "dm", "joined-above", "joined-below"):
+            if old.has_css_class(css_class):
+                new.add_css_class(css_class)
+        column = record["column"]
+        column.insert_child_after(new, old)
+        column.remove(old)
+        column.remove(record["footer"])
+        record["bubble"], record["footer"] = new, None
+        self._message_bubbles[msg_id] = new
+        if self._group_bubble is old:
+            self._group_bubble = new
+
+    def _remove_message_row(self, msg_id: str) -> None:
+        """Deleted for me: the row goes, and the rows either side regroup."""
+        record = self._message_rows.get(msg_id)
+        self._forget_message(msg_id)
+        self._message_bubbles.pop(msg_id, None)
+        if record is None:
+            return
+        row, bubble = record["row"], record["bubble"]
+        above, below = bubble.has_css_class("joined-above"), bubble.has_css_class("joined-below")
+        previous = self._bubble_rows.get(row.get_prev_sibling()) if above else None
+        following = self._bubble_rows.get(row.get_next_sibling()) if below else None
+        if following is not None and not above:
+            # The next message starts the group now: it takes over the gap
+            # above, and for someone else's messages the avatar and name.
+            following["bubble"].remove_css_class("joined-above")
+            following["row"].set_margin_top(row.get_margin_top())
+            if record["head"] is not None:
+                avatar, sender = record["head"]
+                row.remove(avatar)
+                record["column"].remove(sender)
+                following["row"].remove(following["row"].get_first_child())  # the spacer under the avatar
+                following["row"].prepend(avatar)
+                following["column"].prepend(sender)
+                following["head"] = record["head"]
+        elif following is None and previous is not None:
+            previous["bubble"].remove_css_class("joined-below")
+        if self._group_bubble is bubble:
+            if previous is None:
+                self._group_key, self._group_bubble = None, None
+            else:
+                self._group_bubble = previous["bubble"]
+        del self._bubble_rows[row]
+        self.chat_box.remove(row)
+        if self.chat_box.get_first_child() is None:
+            self.chat_stack.set_visible_child_name("empty")
 
     # -- treats: coffee, cocktails, dancers ---------------------------------
 
@@ -2220,6 +2508,7 @@ class RelayWindow(Adw.ApplicationWindow):
             is_mine=is_mine,
             is_dm=is_dm,
             dm_peer_device_id=peer_device_id,
+            from_device=sender,
         )
         self._remember(
             obj, is_dm=is_dm, peer_device_id=peer_device_id, kind=treat.kind, extra={"to_nick": to_nick, "note": note}
@@ -2241,6 +2530,7 @@ class RelayWindow(Adw.ApplicationWindow):
         is_mine: bool = False,
         is_dm: bool = False,
         dm_peer_device_id: Optional[str] = None,
+        from_device: Optional[str] = None,
     ) -> None:
         headline = treat.headline(is_mine=is_mine, to_one=is_dm, to_nick=to_nick)
         info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
@@ -2271,6 +2561,7 @@ class RelayWindow(Adw.ApplicationWindow):
             msg_id=msg_id,
             dm_peer_device_id=dm_peer_device_id,
             preview=f"{treat.emoji} {note or treat.noun.capitalize()}",
+            from_device=from_device,
         )
 
     def _play_treat(self, treat: _Treat) -> None:

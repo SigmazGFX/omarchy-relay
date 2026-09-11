@@ -16,7 +16,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Log, Static
 
-from .chat import _notify, _reply_prefix
+from .chat import _is_quiet, _notify, _reply_prefix
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
@@ -91,12 +91,13 @@ class RelayApp(App):
         self._log(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {_reply_prefix(obj)}{obj['text']}")
         # Broadcasts echo back to the sender too (we're subscribed to our own
         # publish topic) — don't pop a notification for our own messages.
-        if obj.get("from") != self.cfg.device_id:
+        if obj.get("from") != self.cfg.device_id and not _is_quiet(obj):
             _notify(obj["nick"], obj["text"])
 
     def _handle_dm(self, obj: dict) -> None:
         self._log(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {_reply_prefix(obj)}{obj['text']}")
-        _notify(f"DM from {obj['nick']}", obj["text"])
+        if not _is_quiet(obj):
+            _notify(f"DM from {obj['nick']}", obj["text"])
 
     def _handle_presence(self, device_id: str, data) -> None:
         changed, previous = self.peers.update(device_id, data)
