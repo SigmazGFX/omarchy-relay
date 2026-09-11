@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.7.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Reply to a message",
+                "The reply arrow under a message quotes it in your next one. Click a quote to jump to the "
+                "original, and a reply to a direct message stays private.",
+            ),
+        ),
+    ),
+    Release(
         version="0.6.0",
         date="2026-09-11",
         items=(

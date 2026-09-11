@@ -33,7 +33,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+gi.require_version("Graphene", "1.0")
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango  # noqa: E402
 
 from . import audio, history, network_share, release_notes
 from .chat import _ding, _notify
@@ -159,6 +160,40 @@ button.recording {
   min-height: 32px;
   padding: 0;
   border-radius: 9999px;
+}
+
+/* Replies: the quote at the top of a reply, the bar above the composer
+   while writing one, and the flash on a message a quote jumps to. */
+.reply-quote {
+  min-height: 0;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border-left: 3px solid var(--accent-color);
+  background-color: color-mix(in srgb, currentColor 8%, transparent);
+}
+.bubble.mine .reply-quote {
+  border-left-color: var(--accent-fg-color);
+}
+.reply-quote .reply-nick {
+  font-weight: bold;
+  font-size: 0.85em;
+}
+.reply-quote .reply-text {
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+.reply-bar {
+  margin: 6px 10px 0 10px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 10px;
+  border-left: 3px solid var(--accent-color);
+  background-color: color-mix(in srgb, var(--card-bg-color), var(--card-fg-color) 6%);
+}
+.bubble {
+  transition: box-shadow 500ms ease-out;
+}
+.bubble.flash {
+  box-shadow: 0 0 0 3px var(--accent-color);
 }
 
 .nick-0 { color: oklab(from var(--relay-nick-0) var(--standalone-color-oklab)); }
@@ -506,6 +541,9 @@ _SPARKLE_STEP_MS = 50
 # /coffee, /cocktail, /dancer: how long the animation stays up over the window.
 _TREAT_BURST_MS = 2900
 
+# Replies quote the start of the message they answer: a preview, not a copy.
+_REPLY_PREVIEW_CHARS = 200
+
 
 @dataclasses.dataclass(frozen=True)
 class _Treat:
@@ -547,6 +585,20 @@ _TREATS = {
 # showing, its placeholders arrive as literal text and are dropped.
 _COMMAND_HINTS = ("/action <nickname> <command-name>",) + tuple(f"/{kind} <nickname> <note>" for kind in _TREATS)
 _HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note)>")
+
+
+def _reply_ref(obj: dict) -> Optional[dict]:
+    """A message's "reply_to" ({"id", "nick", "text"}), or None when it has
+    none. It comes from other clients, so anything malformed is dropped and
+    the quoted text is capped."""
+    ref = obj.get("reply_to")
+    if not isinstance(ref, dict) or not ref.get("id"):
+        return None
+    return {
+        "id": str(ref["id"]),
+        "nick": str(ref.get("nick") or "?"),
+        "text": str(ref.get("text") or "")[:_REPLY_PREVIEW_CHARS],
+    }
 
 
 def _is_emoji_only(text: str, max_len: int = 12) -> bool:
@@ -610,7 +662,8 @@ class RelayWindow(Adw.ApplicationWindow):
 
         # Reactions, keyed by message id — session-only, like the rest of the
         # chat log (nothing here is persisted to disk).
-        self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id"}
+        self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id", "nick", "preview"}
+        self._message_bubbles: dict[str, Gtk.Widget] = {}  # msg_id -> its bubble, for replies to jump to
         self._reaction_slots: dict[str, Gtk.Box] = {}  # msg_id -> its reaction-pills row
         self._reactions: dict[str, dict[str, dict[str, str]]] = {}  # msg_id -> emoji -> device_id -> nick
         self._sparkle_active = False
@@ -622,6 +675,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._typing_sent_at = 0.0  # monotonic time we last told peers we're typing; 0 = we aren't
         self._typing_peers: dict[str, tuple[str, int]] = {}  # device_id -> (nick, expiry GLib source id)
         self._treat_active = False
+        self._reply_to: Optional[dict] = None  # the message being replied to: id plus its _message_meta
         self._hyprland_lock = threading.Lock()
         self._hyprland_floated = False  # the window lock floated the window, so unlocking tiles it again
         self._hyprland_watch: Optional[socket.socket] = None  # Hyprland's event socket, followed while locked
@@ -732,6 +786,7 @@ class RelayWindow(Adw.ApplicationWindow):
         chat_column.append(self.chat_box)
         chat_column.append(self._build_typing_row())
         clamp = Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=chat_column)
+        self._chat_content = clamp  # the scrolled content, whose coordinates the scrollbar uses
         self.chat_scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
         adjustment = self.chat_scroller.get_vadjustment()
         adjustment.connect("changed", self._on_chat_resized)
@@ -830,7 +885,31 @@ class RelayWindow(Adw.ApplicationWindow):
         composer.append(field)
         composer.append(self.mic_btn)
         composer.append(self.send_btn)
-        return Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=composer)
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        column.append(self._build_reply_bar())
+        column.append(composer)
+        return Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=column)
+
+    def _build_reply_bar(self) -> Gtk.Widget:
+        self.reply_title = Gtk.Label(xalign=0, css_classes=["caption-heading"])
+        self.reply_preview = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["caption", "dim-label"])
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        labels.append(self.reply_title)
+        labels.append(self.reply_preview)
+        cancel_btn = Gtk.Button(
+            icon_name="window-close-symbolic",
+            tooltip_text="Cancel reply (Esc)",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular"],
+        )
+        cancel_btn.connect("clicked", lambda _b: self._cancel_reply())
+        bar = Gtk.Box(spacing=6, css_classes=["reply-bar"])
+        bar.append(labels)
+        bar.append(cancel_btn)
+        self.reply_revealer = Gtk.Revealer(
+            child=bar, transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=150
+        )
+        return self.reply_revealer
 
     def _build_typing_row(self) -> Gtk.Widget:
         self.typing_avatar = Adw.Avatar(size=32, show_initials=True, valign=Gtk.Align.END)
@@ -974,6 +1053,7 @@ class RelayWindow(Adw.ApplicationWindow):
         is_dm: bool = False,
         msg_id: Optional[str] = None,
         dm_peer_device_id: Optional[str] = None,
+        preview: str = "",
     ) -> None:
         """Places a bubble on its side of the chat, folding it into the
         previous message's group when it's the same sender shortly after."""
@@ -1006,12 +1086,19 @@ class RelayWindow(Adw.ApplicationWindow):
                 column.append(sender)
         column.append(bubble)
         if msg_id:
-            self._message_meta[msg_id] = {"is_dm": is_dm, "peer_device_id": dm_peer_device_id}
+            self._message_meta[msg_id] = {
+                "is_dm": is_dm,
+                "peer_device_id": dm_peer_device_id,
+                "nick": nick,
+                "preview": preview,
+            }
+            self._message_bubbles[msg_id] = bubble
             reactions_row = Gtk.Box(spacing=4, css_classes=["reactions-row"])
             self._reaction_slots[msg_id] = reactions_row
             footer = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
             footer.append(reactions_row)
             footer.append(self._build_react_button(msg_id))
+            footer.append(self._build_reply_button(msg_id))
             if is_mine:
                 footer.set_halign(Gtk.Align.END)
             column.append(footer)
@@ -1028,6 +1115,7 @@ class RelayWindow(Adw.ApplicationWindow):
         is_dm: bool = False,
         dm_peer_device_id: Optional[str] = None,
         is_history: bool = False,
+        reply_to: Optional[dict] = None,
     ) -> None:
         body = Gtk.Label(
             label=text,
@@ -1045,11 +1133,23 @@ class RelayWindow(Adw.ApplicationWindow):
             body.add_css_class("emoji-only")
         stamp = self._stamp(ts)
         stamp.set_valign(Gtk.Align.END)
-        bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
-        bubble.append(body)
-        bubble.append(stamp)
+        line = Gtk.Box(spacing=10, css_classes=[] if reply_to else ["bubble"])
+        line.append(body)
+        line.append(stamp)
+        bubble = line
+        if reply_to:
+            bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["bubble"])
+            bubble.append(self._build_reply_quote(reply_to))
+            bubble.append(line)
         self._append_bubble(
-            bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm, msg_id=msg_id, dm_peer_device_id=dm_peer_device_id
+            bubble,
+            nick=nick,
+            ts=ts,
+            is_mine=is_mine,
+            is_dm=is_dm,
+            msg_id=msg_id,
+            dm_peer_device_id=dm_peer_device_id,
+            preview=text,
         )
         if not is_history and _SPARKLE_TRIGGER in text.lower():
             self._play_sparkles()
@@ -1245,8 +1345,9 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         self._clear_typing(obj.get("from", ""))
         is_mine = obj.get("from") == self.cfg.device_id
-        self._append_text(obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine)
-        self._remember(obj, is_dm=False, peer_device_id=None)
+        reply = _reply_ref(obj)
+        self._append_text(obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine, reply_to=reply)
+        self._remember(obj, is_dm=False, peer_device_id=None, extra={"reply_to": reply} if reply else None)
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
@@ -1260,10 +1361,17 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") in _TREATS:
             self._handle_treat(_TREATS[obj["type"]], obj, is_dm=True)
             return
+        reply = _reply_ref(obj)
         self._append_text(
-            obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_dm=True, dm_peer_device_id=obj.get("from")
+            obj["nick"],
+            obj["ts"],
+            obj["text"],
+            msg_id=obj.get("id"),
+            is_dm=True,
+            dm_peer_device_id=obj.get("from"),
+            reply_to=reply,
         )
-        self._remember(obj, is_dm=True, peer_device_id=obj.get("from"))
+        self._remember(obj, is_dm=True, peer_device_id=obj.get("from"), extra={"reply_to": reply} if reply else None)
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
 
@@ -1348,6 +1456,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 is_dm=m["is_dm"],
                 dm_peer_device_id=m["peer_device_id"],
                 is_history=True,
+                reply_to=_reply_ref(m["extra"]),
             )
         count = len(messages)
         self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
@@ -1517,9 +1626,37 @@ class RelayWindow(Adw.ApplicationWindow):
         if parts and parts[0].startswith("/") and parts[0][1:] in _TREATS:
             self._handle_treat_command(_TREATS[parts[0][1:]], text)
             return
-        self.client.send_chat(
-            {"id": uuid.uuid4().hex, "ts": time.time(), "from": self.cfg.device_id, "nick": self.cfg.nickname, "text": text}
+        payload = {
+            "id": uuid.uuid4().hex,
+            "ts": time.time(),
+            "from": self.cfg.device_id,
+            "nick": self.cfg.nickname,
+            "text": text,
+        }
+        reply = self._reply_to
+        self._cancel_reply()
+        if reply is None:
+            self.client.send_chat(payload)
+            return
+        payload["reply_to"] = {"id": reply["id"], "nick": reply["nick"], "text": reply["preview"][:_REPLY_PREVIEW_CHARS]}
+        peer = reply["peer_device_id"]
+        if not (reply["is_dm"] and peer):
+            self.client.send_chat(payload)
+            return
+        # A reply to a direct message stays one, so its quote never goes out to everyone.
+        self.client.send_dm(peer, payload)
+        # DMs aren't echoed back to the sender the way broadcasts are.
+        self._append_text(
+            self.cfg.nickname,
+            payload["ts"],
+            text,
+            msg_id=payload["id"],
+            is_mine=True,
+            is_dm=True,
+            dm_peer_device_id=peer,
+            reply_to=payload["reply_to"],
         )
+        self._remember(payload, is_dm=True, peer_device_id=peer, extra={"reply_to": payload["reply_to"]})
 
     def _handle_action_command(self, parts: list[str]) -> None:
         if len(parts) != 3:
@@ -1796,6 +1933,9 @@ class RelayWindow(Adw.ApplicationWindow):
             self._append_system(str(exc))
 
     def _on_entry_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
+        if keyval == Gdk.KEY_Escape and self._reply_to is not None:
+            self._cancel_reply()
+            return True
         is_paste = keyval == Gdk.KEY_v and bool(state & Gdk.ModifierType.CONTROL_MASK)
         if not is_paste:
             return False  # not our shortcut — let it through
@@ -1866,6 +2006,65 @@ class RelayWindow(Adw.ApplicationWindow):
         elif path is not None:
             self._send_own_image(path)
         return False
+
+    # -- replies -----------------------------------------------------------
+
+    def _build_reply_button(self, msg_id: str) -> Gtk.Button:
+        button = Gtk.Button(
+            icon_name="mail-reply-sender-symbolic",
+            tooltip_text="Reply",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular", "react-btn"],
+        )
+        button.connect("clicked", lambda _b: self._start_reply(msg_id))
+        return button
+
+    def _build_reply_quote(self, reply_to: dict) -> Gtk.Widget:
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        labels.append(Gtk.Label(label=reply_to["nick"], xalign=0, css_classes=["reply-nick"]))
+        labels.append(
+            Gtk.Label(
+                label=reply_to["text"],
+                xalign=0,
+                wrap=True,
+                wrap_mode=Pango.WrapMode.WORD_CHAR,
+                natural_wrap_mode=Gtk.NaturalWrapMode.NONE,
+                lines=2,
+                ellipsize=Pango.EllipsizeMode.END,
+                max_width_chars=48,
+                css_classes=["reply-text"],
+            )
+        )
+        quote = Gtk.Button(child=labels, tooltip_text="Show the original message", css_classes=["flat", "reply-quote"])
+        quote.connect("clicked", lambda _b: self._jump_to_message(reply_to["id"]))
+        return quote
+
+    def _start_reply(self, msg_id: str) -> None:
+        meta = self._message_meta.get(msg_id)
+        if meta is None:
+            return
+        self._reply_to = {"id": msg_id, **meta}
+        privately = " privately" if meta["is_dm"] else ""
+        self.reply_title.set_label(f"Replying{privately} to {meta['nick']}")
+        self.reply_preview.set_label(" ".join(meta["preview"].split()))
+        self.reply_revealer.set_reveal_child(True)
+        self.entry.grab_focus()
+
+    def _cancel_reply(self) -> None:
+        self._reply_to = None
+        self.reply_revealer.set_reveal_child(False)
+
+    def _jump_to_message(self, msg_id: str) -> None:
+        bubble = self._message_bubbles.get(msg_id)
+        found, point = (False, None) if bubble is None else bubble.compute_point(self._chat_content, Graphene.Point().init(0, 0))
+        if not found or bubble.get_root() is not self:
+            self.toast_overlay.add_toast(Adw.Toast(title="The original message isn't in this chat anymore"))
+            return
+        adjustment = self.chat_scroller.get_vadjustment()
+        centered = point.y - (adjustment.get_page_size() - bubble.get_height()) / 2
+        adjustment.set_value(max(0.0, min(centered, adjustment.get_upper() - adjustment.get_page_size())))
+        bubble.add_css_class("flash")
+        GLib.timeout_add(900, lambda: bubble.remove_css_class("flash") or False)
 
     # -- treats: coffee, cocktails, dancers ---------------------------------
 
@@ -1968,7 +2167,14 @@ class RelayWindow(Adw.ApplicationWindow):
         bubble.append(Gtk.Label(label=treat.emoji, valign=Gtk.Align.CENTER, css_classes=["treat-emoji"]))
         bubble.append(info)
         self._append_bubble(
-            bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm, msg_id=msg_id, dm_peer_device_id=dm_peer_device_id
+            bubble,
+            nick=nick,
+            ts=ts,
+            is_mine=is_mine,
+            is_dm=is_dm,
+            msg_id=msg_id,
+            dm_peer_device_id=dm_peer_device_id,
+            preview=f"{treat.emoji} {note or treat.noun.capitalize()}",
         )
 
     def _play_treat(self, treat: _Treat) -> None:
@@ -2585,6 +2791,7 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _apply_new_config(self, new_cfg: Config) -> None:
         self.client.disconnect()
+        self._cancel_reply()  # the message being answered belongs to the old network
 
         self.cfg = new_cfg
         self.peers = PeerDirectory()

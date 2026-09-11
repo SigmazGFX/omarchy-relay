@@ -29,6 +29,12 @@ def _fmt_ts(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
+def _reply_prefix(obj: dict) -> str:
+    """"(reply to Alice) " when the GUI sent this as a reply to someone's message."""
+    ref = obj.get("reply_to")
+    return f"(reply to {ref.get('nick') or '?'}) " if isinstance(ref, dict) else ""
+
+
 def _notify(summary: str, body: str) -> None:
     if shutil.which("notify-send"):
         try:
@@ -56,7 +62,7 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
     client = RelayClient(cfg)
 
     def on_chat(obj):
-        print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {obj['text']}")
+        print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {_reply_prefix(obj)}{obj['text']}")
         # Broadcasts echo back to the sender too (we're subscribed to our own
         # publish topic) — don't pop a notification/sound for our own messages.
         if obj.get("from") != cfg.device_id:
@@ -64,7 +70,7 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
             _ding()
 
     def on_dm(obj):
-        print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {obj['text']}")
+        print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {_reply_prefix(obj)}{obj['text']}")
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
 

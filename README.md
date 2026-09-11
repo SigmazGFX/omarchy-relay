@@ -213,6 +213,13 @@ show in a bubble at the bottom of the chat (with their name) and under
 their name in the sidebar, and the chat header says so ("Alice is
 typing…"). `chat` and `chat --tui` neither send nor show it.
 
+**Replies**: the reply arrow under a message (next to the react button)
+quotes it above the message box; what you send next carries that quote at
+its top. Click a quote to jump to the original, and Esc or × cancels the
+reply. A reply to a direct message goes back to that person only. Replies
+are kept in message history; `chat` and `chat --tui` mark them "(reply to
+Alice)", and older clients show them as ordinary messages.
+
 **Coffee, cocktails, and dancers**: `/coffee`, `/cocktail`, and `/dancer`
 send one to everyone, and `/coffee <nickname> [note]` (likewise
 `/cocktail` and `/dancer`) sends one to one person — the commands are the
