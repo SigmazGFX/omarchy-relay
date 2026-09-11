@@ -89,10 +89,20 @@ class RelayClient:
         self.on_file_chunk: Optional[Callable[[dict], None]] = None
         self.on_action_request: Optional[Callable[[dict], None]] = None
         self.on_typing: Optional[Callable[[dict], None]] = None
+        self.on_screen_state: Optional[Callable[[str, Optional[dict]], None]] = None
+        self.on_screen_watch: Optional[Callable[[dict], None]] = None
+        self.on_screen_frame: Optional[Callable[[dict, bytes], None]] = None
         self.on_bad_message: Optional[Callable[[str, Exception], None]] = None
 
         # Remote-action request/result matching (see remote_actions.py).
         self.pending_actions = PendingActions()
+
+        # Screen sharing (see screenshare.py): our own share state, retained
+        # and republished on every (re)connect, and the shares being watched
+        # here — frame topics are only subscribed while a viewer is open.
+        self.screen_state_topic = f"{self.ns}/screen/{cfg.device_id}"
+        self.screen_state: Optional[dict] = None
+        self._watched_shares: set[str] = set()
 
         self.connected = threading.Event()
 
@@ -107,6 +117,7 @@ class RelayClient:
 
     def disconnect(self) -> None:
         try:
+            self._client.publish(self.screen_state_topic, payload=b"", qos=1, retain=True)
             self._client.publish(self.presence_topic, payload=b"", qos=1, retain=True).wait_for_publish(3)
         except Exception:
             pass
@@ -138,6 +149,39 @@ class RelayClient:
     def send_action_result(self, target_device_id: str, obj: dict) -> None:
         self._publish_encrypted(f"{self.ns}/action-result/{target_device_id}", obj)
 
+    def set_screen_state(self, obj: Optional[dict]) -> None:
+        """Retained, so a peer who comes online mid-share still sees it.
+        None clears it."""
+        self.screen_state = obj
+        if obj is None:
+            self._client.publish(self.screen_state_topic, payload=b"", qos=1, retain=True)
+        else:
+            self._publish_encrypted(self.screen_state_topic, obj, retain=True)
+
+    def send_screen_watch(self, sharer_device_id: str, obj: dict) -> None:
+        # Repeated every few seconds while watching, so QoS 0 like typing.
+        self._publish_encrypted(f"{self.ns}/screen-watch/{sharer_device_id}", obj, qos=0)
+
+    def send_screen_frame(self, share_id: str, header: dict, chunk: bytes):
+        """A JSON header line, then the raw JPEG bytes — no base64 layer on
+        top of Fernet's own. QoS 0: a lost chunk only loses that frame, and
+        the next one replaces it anyway. Returns paho's MQTTMessageInfo so
+        the sender can tell when the frame has actually gone out."""
+        plaintext = json.dumps(header).encode("utf-8") + b"\n" + chunk
+        return self._client.publish(
+            f"{self.ns}/screen-frame/{share_id}", payload=self.cipher.encrypt(plaintext), qos=0
+        )
+
+    def watch_screen(self, share_id: str) -> None:
+        self._watched_shares.add(share_id)
+        if self.connected.is_set():
+            self._client.subscribe(f"{self.ns}/screen-frame/{share_id}", 0)
+
+    def unwatch_screen(self, share_id: str) -> None:
+        self._watched_shares.discard(share_id)
+        if self.connected.is_set():
+            self._client.unsubscribe(f"{self.ns}/screen-frame/{share_id}")
+
     def _publish_encrypted(self, topic: str, obj: dict, qos: int = 1, retain: bool = False) -> None:
         token = self.cipher.encrypt(json.dumps(obj).encode("utf-8"))
         self._client.publish(topic, payload=token, qos=qos, retain=retain)
@@ -157,9 +201,15 @@ class RelayClient:
                 (f"{self.ns}/file/+/chunk", 1),
                 (f"{self.ns}/action/{self.cfg.device_id}", 1),
                 (f"{self.ns}/action-result/{self.cfg.device_id}", 1),
+                (f"{self.ns}/screen/+", 1),
+                (f"{self.ns}/screen-watch/{self.cfg.device_id}", 0),
             ]
+            + [(f"{self.ns}/screen-frame/{share_id}", 0) for share_id in self._watched_shares]
         )
         self._publish_presence()
+        # Republishing (or clearing) on every connect also wipes a stale
+        # share left retained by a crash, which has no Last Will of its own.
+        self.set_screen_state(self.screen_state)
         self.connected.set()
 
     def _on_disconnect(self, client, userdata, rc):
@@ -179,6 +229,12 @@ class RelayClient:
                 self._dispatch_encrypted(msg.payload, self.on_dm)
             elif topic == f"{self.ns}/typing":
                 self._dispatch_encrypted(msg.payload, self.on_typing)
+            elif len(parts) >= 2 and parts[-2] == "screen":
+                self._handle_screen_state(parts[-1], msg.payload)
+            elif topic == f"{self.ns}/screen-watch/{self.cfg.device_id}":
+                self._dispatch_encrypted(msg.payload, self.on_screen_watch)
+            elif len(parts) >= 2 and parts[-2] == "screen-frame":
+                self._handle_screen_frame(msg.payload)
             elif len(parts) >= 2 and parts[-2] == "presence":
                 self._handle_presence(parts[-1], msg.payload)
             elif len(parts) >= 2 and parts[-1] == "meta" and "file" in parts:
@@ -203,6 +259,20 @@ class RelayClient:
         data = json.loads(payload.decode("utf-8"))
         if self.on_presence:
             self.on_presence(device_id, data)
+
+    def _handle_screen_state(self, device_id: str, payload: bytes) -> None:
+        if self.on_screen_state is None:
+            return
+        if not payload:
+            self.on_screen_state(device_id, None)
+            return
+        self.on_screen_state(device_id, json.loads(self.cipher.decrypt(payload).decode("utf-8")))
+
+    def _handle_screen_frame(self, payload: bytes) -> None:
+        if self.on_screen_frame is None:
+            return
+        header, _newline, chunk = self.cipher.decrypt(payload).partition(b"\n")
+        self.on_screen_frame(json.loads(header.decode("utf-8")), chunk)
 
     def _dispatch_encrypted(self, payload: bytes, handler) -> None:
         if handler is None:

@@ -50,6 +50,20 @@ class Config:
     # dimension; both apply together when both are set.
     history_retain_count: int = 200
     history_retain_days: float = 0
+    # Window lock: a fixed-size window that can't be resized, maximized, or
+    # fullscreened. On Hyprland it's also floated, since a tiled window gets
+    # resized by the layout no matter what size it asks for.
+    lock_window_size: bool = False
+    window_width: int = 900
+    window_height: int = 640
+    # The newest release whose notes this user has seen — "What's New" opens
+    # by itself once whenever the running version is newer than this.
+    last_seen_version: str = ""
+    # Screen sharing: frames are JPEG stills, scaled to fit max_width and
+    # sent at most `fps` times a second, only while someone is watching.
+    screen_share_fps: int = 3
+    screen_share_max_width: int = 1280
+    screen_share_quality: int = 60
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
@@ -63,6 +77,7 @@ class Config:
         transfer = data.get("transfer", {})
         remote_actions = data.get("remote_actions", {})
         ui = data.get("ui", {})
+        screen_share = data.get("screen_share", {})
         cfg = cls(
             nickname=identity.get("nickname") or socket.gethostname(),
             device_id=identity.get("device_id") or default_device_id(),
@@ -82,6 +97,13 @@ class Config:
             show_presence=ui.get("show_presence", True),
             history_retain_count=ui.get("history_retain_count", 200),
             history_retain_days=ui.get("history_retain_days", 0),
+            lock_window_size=ui.get("lock_window_size", False),
+            window_width=ui.get("window_width", 900),
+            window_height=ui.get("window_height", 640),
+            last_seen_version=ui.get("last_seen_version", ""),
+            screen_share_fps=screen_share.get("fps", 3),
+            screen_share_max_width=screen_share.get("max_width", 1280),
+            screen_share_quality=screen_share.get("quality", 60),
         )
         if not cfg.broker_host:
             raise ValueError(
@@ -137,6 +159,15 @@ enabled = {"true" if self.remote_actions_enabled else "false"}
 show_presence = {"true" if self.show_presence else "false"}
 history_retain_count = {self.history_retain_count}
 history_retain_days = {self.history_retain_days}
+lock_window_size = {"true" if self.lock_window_size else "false"}
+window_width = {self.window_width}
+window_height = {self.window_height}
+last_seen_version = {s(self.last_seen_version)}
+
+[screen_share]
+fps = {self.screen_share_fps}
+max_width = {self.screen_share_max_width}
+quality = {self.screen_share_quality}
 """
 
 

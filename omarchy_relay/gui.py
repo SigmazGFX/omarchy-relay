@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import json
 import math
 import os
 import random
 import re
+import shutil
+import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -28,9 +32,9 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from . import audio, history, network_share
+from . import audio, history, network_share, release_notes, screenshare
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
@@ -213,6 +217,83 @@ button.send-button {
 }
 .profile {
   padding: 8px 10px;
+}
+
+/* Typing indicator: three dots taking turns to hop. */
+@keyframes relay-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+.typing-dots {
+  margin-top: 5px;
+}
+.typing-dot {
+  min-width: 7px;
+  min-height: 7px;
+  border-radius: 9999px;
+  background-color: currentColor;
+  animation: relay-typing-bounce 1.2s ease-in-out infinite;
+}
+.typing-dots.small .typing-dot {
+  min-width: 5px;
+  min-height: 5px;
+}
+.typing-dot.dot-2 { animation-delay: 0.15s; }
+.typing-dot.dot-3 { animation-delay: 0.3s; }
+.bubble.typing-bubble {
+  padding: 9px 14px 11px 14px;
+}
+
+/* Coffee: the card in the chat, and the steaming cup that pops up over
+   the window when one is sent or received. */
+.coffee-card .coffee-cup {
+  font-size: 2.4em;
+}
+button.coffee-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+/* Every keyframe spells out the same translateY() scale() pair: GTK falls
+   back to matrix interpolation between mismatched transform lists, and a
+   color emoji drawn through that renders as a solid pink square. */
+@keyframes relay-coffee-pop {
+  0% { transform: translateY(0) scale(0.2); opacity: 0; }
+  14% { transform: translateY(0) scale(1.15); opacity: 1; }
+  24% { transform: translateY(0) scale(1); opacity: 1; }
+  78% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-30px) scale(1); opacity: 0; }
+}
+@keyframes relay-coffee-steam {
+  0% { transform: translateY(12px) scale(0.6); opacity: 0; }
+  35% { opacity: 0.75; }
+  100% { transform: translateY(-70px) scale(1.5); opacity: 0; }
+}
+.coffee-burst-cup {
+  font-size: 6em;
+  animation: relay-coffee-pop 2.8s ease-out both;
+}
+.coffee-steam {
+  font-size: 2.2em;
+  font-weight: bold;
+  opacity: 0;
+  animation: relay-coffee-steam 2.2s ease-out both;
+}
+.coffee-steam.steam-1 { animation-delay: 0.35s; }
+.coffee-steam.steam-2 { animation-delay: 0.6s; }
+.coffee-steam.steam-3 { animation-delay: 0.85s; }
+
+/* Screen sharing. */
+.live-badge {
+  background-color: #e01b24;
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 0.8em;
+  font-weight: bold;
+}
+.screen-viewer {
+  background-color: #000000;
 }
 """
 
@@ -412,6 +493,15 @@ _SPARKLE_COUNT = 28
 _SPARKLE_DURATION_MS = 5000
 _SPARKLE_STEP_MS = 50
 
+# /coffee: how long the steaming cup stays up over the window.
+_COFFEE_BURST_MS = 2900
+_COFFEE_STEAM_GLYPH = "∿"
+
+# The composer's inline syntax hints. If Enter is pressed while one is still
+# showing, its placeholders arrive as literal text and are dropped.
+_COMMAND_HINTS = ("/action <nickname> <command-name>", "/coffee <nickname> <note>")
+_HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note)>")
+
 
 def _is_emoji_only(text: str, max_len: int = 12) -> bool:
     """A short WhatsApp/iMessage-style check: render standalone emoji (with
@@ -421,6 +511,23 @@ def _is_emoji_only(text: str, max_len: int = 12) -> bool:
     return bool(stripped) and len(stripped) <= max_len and bool(_EMOJI_ONLY_RE.match(stripped))
 
 
+def _typing_dots(small: bool = False) -> Gtk.Box:
+    """Three bouncing dots, drawn in the surrounding text color."""
+    box = Gtk.Box(spacing=3 if small else 4, valign=Gtk.Align.CENTER, css_classes=["typing-dots"])
+    if small:
+        box.add_css_class("small")
+    for n in (1, 2, 3):
+        box.append(Gtk.Box(valign=Gtk.Align.CENTER, css_classes=["typing-dot", f"dot-{n}"]))
+    return box
+
+
+def _fmt_release_date(date: str) -> str:
+    try:
+        return time.strftime("%B %-d, %Y", time.strptime(date, "%Y-%m-%d"))
+    except ValueError:
+        return date
+
+
 class RelayWindow(Adw.ApplicationWindow):
     def __init__(self, app: "RelayApp", cfg: Config):
         # Closing only hides the window: the connection stays up so you stay
@@ -428,7 +535,10 @@ class RelayWindow(Adw.ApplicationWindow):
         super().__init__(application=app, title="Omarchy Relay", hide_on_close=True)
         self.cfg = cfg
         self.peers = PeerDirectory()
-        self.set_default_size(900, 640)
+        if cfg.lock_window_size:
+            self.set_default_size(cfg.window_width, cfg.window_height)
+        else:
+            self.set_default_size(900, 640)
         self.set_size_request(360, 420)
 
         self.client = RelayClient(cfg)
@@ -465,6 +575,21 @@ class RelayWindow(Adw.ApplicationWindow):
         self._voice_players: list[dict] = []  # each: {"player": audio.Player | None, "reset": callable}
         self._typing_sent_at = 0.0  # monotonic time we last told peers we're typing; 0 = we aren't
         self._typing_peers: dict[str, tuple[str, int]] = {}  # device_id -> (nick, expiry GLib source id)
+        self._coffee_active = False
+        self._sharer: Optional[screenshare.ScreenSharer] = None
+        self._share_watchers: list[str] = []  # nicks currently watching our share
+        self._shares: dict[str, dict] = {}  # device_id -> a peer's live share: share_id, nick, its chat card's widgets
+        self._viewers: dict[str, ScreenViewerWindow] = {}  # share_id -> open viewer window
+        self._hyprland_lock = threading.Lock()
+        self._hyprland_floated = False  # the window lock floated the window, so unlocking tiles it again
+        self._hyprland_watch: Optional[socket.socket] = None  # Hyprland's event socket, followed while locked
+
+        whats_new = Gio.SimpleAction.new("whats-new", None)
+        whats_new.connect("activate", lambda *_: self._show_whats_new())
+        self.add_action(whats_new)
+        self.connect("map", lambda *_: self._apply_window_lock())
+        self.connect("notify::maximized", self._on_window_state_changed)
+        self.connect("notify::fullscreened", self._on_window_state_changed)
 
         self._install_theme()
 
@@ -498,6 +623,7 @@ class RelayWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         header.set_title_widget(Adw.WindowTitle(title="Omarchy Relay"))
         menu = Gio.Menu()
+        menu.append("_What's New", "win.whats-new")
         menu.append("_Quit", "app.quit")
         header.pack_end(
             Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Main Menu", menu_model=menu, primary=True)
@@ -543,6 +669,11 @@ class RelayWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.title_widget = Adw.WindowTitle(title=self.cfg.network_name)
         header.set_title_widget(self.title_widget)
+        self.share_btn = Gtk.Button(icon_name="video-display-symbolic", tooltip_text="Share your screen")
+        self.share_btn.connect("clicked", self._on_share_clicked)
+        header.pack_end(self.share_btn)
+        self.share_badge = Gtk.Label(label="LIVE", visible=False, valign=Gtk.Align.CENTER, css_classes=["live-badge"])
+        header.pack_end(self.share_badge)
 
         self.banner = Adw.Banner(title="Couldn't reach the broker", button_label="Settings")
         self.banner.connect("button-clicked", self._on_open_settings)
@@ -552,8 +683,13 @@ class RelayWindow(Adw.ApplicationWindow):
             title="No messages yet",
             description="Messages on this network show up here.\nPaste an image or attach a file to share it.",
         )
-        self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=8, margin_bottom=8)
-        clamp = Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=self.chat_box)
+        self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=8)
+        # The typing row sits below the messages rather than among them, so
+        # new messages and message grouping never have to step around it.
+        chat_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_bottom=8)
+        chat_column.append(self.chat_box)
+        chat_column.append(self._build_typing_row())
+        clamp = Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=chat_column)
         self.chat_scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
         adjustment = self.chat_scroller.get_vadjustment()
         adjustment.connect("changed", self._on_chat_resized)
@@ -591,7 +727,8 @@ class RelayWindow(Adw.ApplicationWindow):
         # off), just the inline suffix.
         action_hint = Gtk.EntryCompletion()
         hint_model = Gtk.ListStore(str)
-        hint_model.append(["/action <nickname> <command-name>"])
+        for hint in _COMMAND_HINTS:
+            hint_model.append([hint])
         action_hint.set_model(hint_model)
         action_hint.set_text_column(0)
         action_hint.set_inline_completion(True)
@@ -653,6 +790,20 @@ class RelayWindow(Adw.ApplicationWindow):
         composer.append(self.send_btn)
         return Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=composer)
 
+    def _build_typing_row(self) -> Gtk.Widget:
+        self.typing_avatar = Adw.Avatar(size=32, show_initials=True, valign=Gtk.Align.END)
+        bubble = Gtk.Box(css_classes=["bubble", "theirs", "typing-bubble"], valign=Gtk.Align.END)
+        bubble.append(_typing_dots())
+        self.typing_names = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER, css_classes=["caption", "dim-label"])
+        row = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=10)
+        row.append(self.typing_avatar)
+        row.append(bubble)
+        row.append(self.typing_names)
+        self.typing_revealer = Gtk.Revealer(
+            child=row, transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, transition_duration=150
+        )
+        return self.typing_revealer
+
     def _composer_placeholder(self) -> str:
         return f"Message {self.cfg.network_name}"
 
@@ -695,6 +846,11 @@ class RelayWindow(Adw.ApplicationWindow):
         # touch a widget) needs the main-loop marshalling.
         self.client.on_action_request = lambda obj: self.action_handler.handle_request(self.client, obj)
         self.peers.on_removed = self._threaded(self._handle_peer_removed)
+        self.client.on_screen_state = self._threaded(self._handle_screen_state)
+        # Neither of these touches GTK directly, and frames arrive several
+        # times a second — they stay on paho's thread (see the methods).
+        self.client.on_screen_watch = self._on_screen_watch
+        self.client.on_screen_frame = self._on_screen_frame
 
     # -- thread marshalling ------------------------------------------------
 
@@ -995,23 +1151,45 @@ class RelayWindow(Adw.ApplicationWindow):
             nick = data.get("nick", "?")
             avatar = Gtk.Overlay(child=Adw.Avatar(size=32, text=nick, show_initials=True), valign=Gtk.Align.CENTER)
             avatar.add_overlay(Gtk.Box(halign=Gtk.Align.END, valign=Gtk.Align.END, css_classes=["presence-dot"]))
+            is_me = device_id == self.cfg.device_id
             name = Gtk.Label(
-                label=f"{nick} (you)" if device_id == self.cfg.device_id else nick,
+                label=f"{nick} (you)" if is_me else nick,
                 xalign=0,
                 ellipsize=Pango.EllipsizeMode.END,
             )
             if device_id in self._typing_peers:
-                device = Gtk.Label(label="typing…", xalign=0, css_classes=["caption", "typing"])
+                device = _typing_dots(small=True)
+                device.set_halign(Gtk.Align.START)
+                device.set_tooltip_text("typing…")
+                device.add_css_class("typing")
             else:
                 device = Gtk.Label(
                     label=device_id, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["caption", "dim-label"]
                 )
-            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
             labels.append(name)
             labels.append(device)
             box = Gtk.Box(spacing=10, margin_top=3, margin_bottom=3)
             box.append(avatar)
             box.append(labels)
+            if device_id in self._shares:
+                watch_btn = Gtk.Button(
+                    icon_name="video-display-symbolic",
+                    tooltip_text=f"Watch {nick}'s screen",
+                    valign=Gtk.Align.CENTER,
+                    css_classes=["flat", "circular"],
+                )
+                watch_btn.connect("clicked", lambda _b, d=device_id: self._open_viewer(d))
+                box.append(watch_btn)
+            if not is_me:
+                coffee_btn = Gtk.Button(
+                    label="☕",
+                    tooltip_text=f"Send {nick} a coffee",
+                    valign=Gtk.Align.CENTER,
+                    css_classes=["flat", "circular", "coffee-button"],
+                )
+                coffee_btn.connect("clicked", lambda _b, d=device_id: self._send_coffee(d))
+                box.append(coffee_btn)
             self.peer_list.append(Gtk.ListBoxRow(child=box, activatable=False, selectable=False))
         self._update_status()
 
@@ -1020,6 +1198,9 @@ class RelayWindow(Adw.ApplicationWindow):
     def _handle_chat(self, obj: dict) -> None:
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
+            return
+        if obj.get("type") == "coffee":
+            self._handle_coffee(obj, is_dm=False)
             return
         self._clear_typing(obj.get("from", ""))
         is_mine = obj.get("from") == self.cfg.device_id
@@ -1035,6 +1216,9 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
             return
+        if obj.get("type") == "coffee":
+            self._handle_coffee(obj, is_dm=True)
+            return
         self._append_text(
             obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_dm=True, dm_peer_device_id=obj.get("from")
         )
@@ -1042,11 +1226,28 @@ class RelayWindow(Adw.ApplicationWindow):
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
 
-    def _remember(self, obj: dict, *, is_dm: bool, peer_device_id: Optional[str]) -> None:
+    def _remember(
+        self,
+        obj: dict,
+        *,
+        is_dm: bool,
+        peer_device_id: Optional[str],
+        kind: str = "text",
+        extra: Optional[dict] = None,
+    ) -> None:
         if not obj.get("id"):
             return  # nothing stable to key on — skip rather than store an unfindable row
         self.history.add_message(
-            self.cfg.network_name, obj["id"], obj["ts"], obj["from"], obj["nick"], obj["text"], is_dm, peer_device_id
+            self.cfg.network_name,
+            obj["id"],
+            obj["ts"],
+            obj["from"],
+            obj["nick"],
+            obj["text"],
+            is_dm,
+            peer_device_id,
+            kind=kind,
+            extra=extra,
         )
         self.history.prune(self.cfg.network_name, self.cfg.history_retain_count, self.cfg.history_retain_days)
 
@@ -1056,7 +1257,19 @@ class RelayWindow(Adw.ApplicationWindow):
         if not messages:
             return
         for m in messages:
-            is_mine = not m["is_dm"] and m["from_device"] == self.cfg.device_id
+            is_mine = m["from_device"] == self.cfg.device_id
+            if m["kind"] == "coffee":
+                self._append_coffee(
+                    m["nick"],
+                    m["ts"],
+                    to_nick=m["extra"].get("to_nick", ""),
+                    note=m["extra"].get("note", ""),
+                    msg_id=m["id"],
+                    is_mine=is_mine,
+                    is_dm=m["is_dm"],
+                    dm_peer_device_id=m["peer_device_id"],
+                )
+                continue
             self._append_text(
                 m["nick"],
                 m["ts"],
@@ -1093,6 +1306,8 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _handle_peer_removed(self, device_id: str, last_known: dict) -> None:
         self._clear_typing(device_id)
+        if device_id in self._shares:
+            self._end_share(device_id)
         if self.cfg.show_presence:
             self._append_system(f"{last_known.get('nick', device_id)} went offline")
         self._refresh_peer_list()
@@ -1116,17 +1331,34 @@ class RelayWindow(Adw.ApplicationWindow):
         self._typing_peers[device_id] = (obj.get("nick", "?"), expiry)
         if not previous:
             self._refresh_peer_list()
+            self._render_typing()
 
     def _clear_typing(self, device_id: str) -> None:
         entry = self._typing_peers.pop(device_id, None)
         if entry:
             GLib.source_remove(entry[1])
             self._refresh_peer_list()
+            self._render_typing()
 
     def _on_typing_expired(self, device_id: str) -> bool:
         self._typing_peers.pop(device_id, None)
         self._refresh_peer_list()
+        self._render_typing()
         return False
+
+    def _render_typing(self) -> None:
+        nicks = sorted(nick for nick, _expiry in self._typing_peers.values())
+        if nicks:
+            self.typing_avatar.set_text(nicks[0])
+            if len(nicks) == 1:
+                names = nicks[0]
+            elif len(nicks) == 2:
+                names = f"{nicks[0]} and {nicks[1]}"
+            else:
+                names = f"{nicks[0]} and {len(nicks) - 1} others"
+            self.typing_names.set_label(names)
+            self.chat_stack.set_visible_child_name("chat")
+        self.typing_revealer.set_reveal_child(bool(nicks))
 
     def _typing_summary(self) -> str:
         nicks = sorted(nick for nick, _expiry in self._typing_peers.values())
@@ -1186,9 +1418,14 @@ class RelayWindow(Adw.ApplicationWindow):
         if not text:
             return
         self.entry.set_text("")
+        if text.startswith("/"):
+            text = _HINT_PLACEHOLDER.sub("", text).strip()
         parts = text.split(maxsplit=2)
         if parts and parts[0] == "/action":
             self._handle_action_command(parts)
+            return
+        if parts and parts[0] == "/coffee":
+            self._handle_coffee_command(text)
             return
         self.client.send_chat(
             {"id": uuid.uuid4().hex, "ts": time.time(), "from": self.cfg.device_id, "nick": self.cfg.nickname, "text": text}
@@ -1500,6 +1737,452 @@ class RelayWindow(Adw.ApplicationWindow):
         # safe to clean up shortly after rather than keep it around.
         GLib.timeout_add_seconds(5, lambda: tmp_path.unlink(missing_ok=True) or False)
 
+    # -- coffee ----------------------------------------------------------
+
+    def _handle_coffee_command(self, text: str) -> None:
+        # "/coffee" is for everyone; "/coffee <nickname> [note]" for one
+        # person. When the first word isn't anyone online, it's all a note.
+        rest = text[len("/coffee") :].strip()
+        target, note = None, rest
+        if rest:
+            first, _space, remainder = rest.partition(" ")
+            resolved = self.peers.resolve(first)
+            if resolved:
+                target, note = resolved, remainder.strip()
+        self._send_coffee(target, note)
+
+    def _send_coffee(self, target_device_id: Optional[str], note: str = "") -> None:
+        if target_device_id == self.cfg.device_id:
+            self.toast_overlay.add_toast(Adw.Toast(title="That one you'll have to make yourself ☕"))
+            return
+        if not self.client.connected.is_set():
+            self.toast_overlay.add_toast(Adw.Toast(title="Not connected — the coffee will have to wait"))
+            return
+        to_nick = self.peers.snapshot().get(target_device_id, {}).get("nick", "") if target_device_id else ""
+        fallback = "☕ sent you a cup of coffee" if target_device_id else "☕ bought everyone a cup of coffee"
+        payload = {
+            "type": "coffee",
+            "id": uuid.uuid4().hex,
+            "ts": time.time(),
+            "from": self.cfg.device_id,
+            "nick": self.cfg.nickname,
+            "to": target_device_id or "*",
+            "to_nick": to_nick,
+            "note": note,
+            # What older clients, and the terminal chat/TUI, show instead.
+            "text": f"{fallback}: {note}" if note else fallback,
+        }
+        if target_device_id:
+            self.client.send_dm(target_device_id, payload)
+            # DMs aren't echoed back to the sender the way broadcasts are.
+            self._handle_coffee(payload, is_dm=True)
+        else:
+            self.client.send_chat(payload)
+
+    def _handle_coffee(self, obj: dict, *, is_dm: bool) -> None:
+        sender = obj.get("from", "")
+        is_mine = sender == self.cfg.device_id
+        self._clear_typing(sender)
+        peer_device_id = (obj.get("to") if is_mine else sender) if is_dm else None
+        to_nick, note = obj.get("to_nick", ""), obj.get("note", "")
+        self._append_coffee(
+            obj["nick"],
+            obj["ts"],
+            to_nick=to_nick,
+            note=note,
+            msg_id=obj.get("id"),
+            is_mine=is_mine,
+            is_dm=is_dm,
+            dm_peer_device_id=peer_device_id,
+        )
+        self._remember(
+            obj, is_dm=is_dm, peer_device_id=peer_device_id, kind="coffee", extra={"to_nick": to_nick, "note": note}
+        )
+        self._play_coffee()
+        if not is_mine:
+            _notify(obj["nick"], "sent you a cup of coffee ☕" if is_dm else "bought everyone a cup of coffee ☕")
+            _ding()
+
+    def _append_coffee(
+        self,
+        nick: str,
+        ts: float,
+        *,
+        to_nick: str,
+        note: str,
+        msg_id: Optional[str] = None,
+        is_mine: bool = False,
+        is_dm: bool = False,
+        dm_peer_device_id: Optional[str] = None,
+    ) -> None:
+        if is_mine:
+            headline = f"You sent {to_nick or 'them'} a coffee" if is_dm else "You bought everyone a coffee"
+        else:
+            headline = "Sent you a coffee" if is_dm else "Bought everyone a coffee"
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        info.append(Gtk.Label(label=headline, xalign=0, wrap=True, css_classes=["heading"]))
+        if note:
+            info.append(
+                Gtk.Label(
+                    label=note,
+                    xalign=0,
+                    wrap=True,
+                    wrap_mode=Pango.WrapMode.WORD_CHAR,
+                    max_width_chars=40,
+                    selectable=True,
+                )
+            )
+        stamp = self._stamp(ts)
+        stamp.set_halign(Gtk.Align.START)
+        info.append(stamp)
+        bubble = Gtk.Box(spacing=12, css_classes=["bubble", "coffee-card"])
+        bubble.append(Gtk.Label(label="☕", valign=Gtk.Align.CENTER, css_classes=["coffee-cup"]))
+        bubble.append(info)
+        self._append_bubble(
+            bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm, msg_id=msg_id, dm_peer_device_id=dm_peer_device_id
+        )
+
+    def _play_coffee(self) -> None:
+        if self._coffee_active:
+            return  # one cup at a time
+        self._coffee_active = True
+        steam = Gtk.Box(spacing=14, halign=Gtk.Align.CENTER)
+        for n in (1, 2, 3):
+            steam.append(Gtk.Label(label=_COFFEE_STEAM_GLYPH, css_classes=["coffee-steam", f"steam-{n}"]))
+        stage = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, can_target=False
+        )
+        stage.append(steam)
+        stage.append(Gtk.Label(label="☕", css_classes=["coffee-burst-cup"]))
+        self.sparkle_overlay.add_overlay(stage)
+
+        def finish() -> bool:
+            self.sparkle_overlay.remove_overlay(stage)
+            self._coffee_active = False
+            return False
+
+        GLib.timeout_add(_COFFEE_BURST_MS, finish)
+
+    # -- what's new --------------------------------------------------------
+
+    def maybe_show_whats_new(self) -> None:
+        releases = release_notes.unseen(self.cfg.last_seen_version)
+        if releases:
+            self._show_whats_new(releases)
+
+    def _show_whats_new(self, releases: Optional[tuple] = None) -> None:
+        showing_all = releases is None
+        if releases is None:
+            releases = release_notes.RELEASES
+        dialog = Adw.Dialog(title="What's New", content_width=480, content_height=640)
+        page = Adw.PreferencesPage()
+        for release in releases:
+            group = Adw.PreferencesGroup(
+                title=f"Version {release.version}", description=_fmt_release_date(release.date)
+            )
+            for headline, description in release.items:
+                # Row titles are Pango markup, and notes mention things like
+                # "<nickname>".
+                group.add(
+                    Adw.ActionRow(
+                        title=GLib.markup_escape_text(headline), subtitle=GLib.markup_escape_text(description)
+                    )
+                )
+            page.add(group)
+        if not showing_all and len(releases) < len(release_notes.RELEASES):
+            earlier_group = Adw.PreferencesGroup()
+            earlier_row = Adw.ActionRow(title="All releases", activatable=True)
+            earlier_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+
+            def on_earlier(_row) -> None:
+                dialog.connect("closed", lambda *_: self._show_whats_new())
+                dialog.close()
+
+            earlier_row.connect("activated", on_earlier)
+            earlier_group.add(earlier_row)
+            page.add(earlier_group)
+        view = Adw.ToolbarView(content=page)
+        view.add_top_bar(Adw.HeaderBar())
+        dialog.set_child(view)
+        dialog.present(self)
+        current = release_notes.current_version()
+        if self.cfg.last_seen_version != current:
+            self.cfg.last_seen_version = current
+            self.cfg.save()
+
+    # -- window lock -------------------------------------------------------
+
+    def _apply_window_lock(self) -> None:
+        locked = self.cfg.lock_window_size
+        width, height = self.cfg.window_width, self.cfg.window_height
+        if locked:
+            self.unmaximize()
+            self.unfullscreen()
+            self.set_size_request(width, height)
+            self.set_default_size(width, height)
+        else:
+            self.set_size_request(360, 420)
+        self.set_resizable(not locked)
+        if locked:
+            self._start_hyprland_lock_watch(self.get_title())
+        else:
+            self._stop_hyprland_lock_watch()
+        if locked or self._hyprland_floated:
+            threading.Thread(
+                target=self._sync_hyprland_lock, args=(locked, width, height, self.get_title()), daemon=True
+            ).start()
+
+    def _on_window_state_changed(self, *_args) -> None:
+        if not self.cfg.lock_window_size:
+            return
+        # GTK's own controls are already gone on a non-resizable window, but
+        # a compositor keybinding can still maximize or fullscreen any window.
+        # Most compositors tell the window, which lands here; Hyprland doesn't
+        # (see _watch_hyprland_events).
+        if self.is_maximized():
+            GLib.idle_add(lambda: self.unmaximize() or False)
+        if self.is_fullscreen():
+            GLib.idle_add(lambda: self.unfullscreen() or False)
+
+    def _sync_hyprland_lock(self, locked: bool, width: int, height: int, title: str, recenter: bool = True) -> None:
+        """Runs on a worker thread. Hyprland's tiling layout sizes a window no
+        matter what size it asks for, so a locked window has to float.
+        recenter=False, used when putting the lock back after a keybinding,
+        leaves a floating window wherever it was moved to."""
+        if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or not shutil.which("hyprctl"):
+            return
+        with self._hyprland_lock:
+            client = None
+            for _attempt in range(10):  # right after "map", Hyprland may not list the window yet
+                clients = _hyprctl_json("clients") or []
+                client = next((c for c in clients if c.get("pid") == os.getpid() and c.get("title") == title), None)
+                if client is not None:
+                    break
+                time.sleep(0.1)
+            if client is None:
+                return
+            window = f"address:{client['address']}"
+            if not locked:
+                if self._hyprland_floated and client.get("floating"):
+                    _hyprland_dispatch(
+                        [_lua_dispatch("window.float", action="disable", window=window)], [f"settiled {window}"]
+                    )
+                self._hyprland_floated = False
+                return
+            lua, legacy = [], []
+            if client.get("fullscreen"):
+                # A floating window gets its old size and position back once
+                # fullscreen ends.
+                lua.append(_lua_dispatch("window.fullscreen_state", internal=0, client=0, window=window))
+            if not client.get("floating"):
+                lua.append(_lua_dispatch("window.float", action="enable", window=window))
+                legacy.append(f"setfloating {window}")
+                self._hyprland_floated = True
+            elif not recenter and (client.get("fullscreen") or list(client.get("size") or []) == [width, height]):
+                _hyprland_dispatch(lua, legacy)
+                return
+            lua.append(_lua_dispatch("window.resize", x=width, y=height, window=window))
+            legacy.append(f"resizewindowpixel exact {width} {height},{window}")
+            monitor = next((m for m in _hyprctl_json("monitors") or [] if m.get("id") == client.get("monitor")), None)
+            if monitor:
+                scale = monitor.get("scale") or 1
+                logical_w, logical_h = monitor["width"] / scale, monitor["height"] / scale
+                if monitor.get("transform", 0) % 2:
+                    logical_w, logical_h = logical_h, logical_w
+                x = round(monitor["x"] + max(0, (logical_w - width) / 2))
+                y = round(monitor["y"] + max(0, (logical_h - height) / 2))
+                lua.append(_lua_dispatch("window.move", x=x, y=y, window=window))
+                legacy.append(f"movewindowpixel exact {x} {y},{window}")
+            _hyprland_dispatch(lua, legacy)
+
+    def _start_hyprland_lock_watch(self, title: str) -> None:
+        """Hyprland keybindings (fullscreen, toggle floating) change a window
+        without telling it, so GTK never hears about them. While the window
+        is locked, follow Hyprland's event socket and put the lock back."""
+        if self._hyprland_watch is not None:
+            return
+        path = _hyprland_event_socket()
+        if path is None:
+            return
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+        except OSError:
+            sock.close()
+            return
+        self._hyprland_watch = sock
+        threading.Thread(target=self._watch_hyprland_events, args=(sock, title), daemon=True).start()
+
+    def _stop_hyprland_lock_watch(self) -> None:
+        sock, self._hyprland_watch = self._hyprland_watch, None
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)  # wakes the watcher's blocked recv()
+        except OSError:
+            pass
+        sock.close()
+
+    def _watch_hyprland_events(self, sock: socket.socket, title: str) -> None:
+        buffer = b""
+        while True:
+            try:
+                data = sock.recv(4096)
+            except OSError:
+                return
+            if not data or self._hyprland_watch is not sock:
+                return
+            buffer += data
+            *lines, buffer = buffer.split(b"\n")
+            # fullscreen>> doesn't say which window; _sync_hyprland_lock looks
+            # this one up and leaves it alone if nothing about it changed.
+            if any(line.split(b">>", 1)[0] in (b"fullscreen", b"changefloatingmode") for line in lines):
+                if self.cfg.lock_window_size:
+                    self._sync_hyprland_lock(
+                        True, self.cfg.window_width, self.cfg.window_height, title, recenter=False
+                    )
+
+    # -- screen sharing ----------------------------------------------------
+
+    def _on_share_clicked(self, _button) -> None:
+        if self._sharer is not None:
+            # Also cancels a share that's still waiting on the picker.
+            self._sharer.stop("You stopped sharing your screen" if self._sharer.active else "")
+            return
+        if not self.client.connected.is_set():
+            self.toast_overlay.add_toast(Adw.Toast(title="Not connected"))
+            return
+        self._share_watchers = []
+        self._sharer = screenshare.ScreenSharer(
+            self.client,
+            self.cfg,
+            on_started=self._on_share_started,
+            on_watchers_changed=self._on_share_watchers,
+            on_ended=self._on_share_ended,
+        )
+        self._update_share_ui()
+        self._sharer.start()
+
+    def _on_share_started(self) -> None:
+        self._append_system("You're sharing your screen — nothing is sent until someone opens it")
+        self._update_share_ui()
+
+    def _on_share_watchers(self, nicks: list[str]) -> None:
+        previous = set(self._share_watchers)
+        for nick in nicks:
+            if nick not in previous:
+                self._append_system(f"{nick} is watching your screen")
+        for nick in sorted(previous - set(nicks)):
+            self._append_system(f"{nick} stopped watching")
+        self._share_watchers = nicks
+        self._update_share_ui()
+
+    def _on_share_ended(self, reason: str) -> None:
+        self._sharer = None
+        self._share_watchers = []
+        if reason:
+            self._append_system(reason)
+        self._update_share_ui()
+
+    def _update_share_ui(self) -> None:
+        sharer = self._sharer
+        live = sharer is not None and sharer.active
+        self.share_btn.set_icon_name("media-playback-stop-symbolic" if live else "video-display-symbolic")
+        if live:
+            self.share_btn.add_css_class("recording")
+            self.share_btn.set_tooltip_text("Stop sharing your screen")
+        else:
+            self.share_btn.remove_css_class("recording")
+            self.share_btn.set_tooltip_text(
+                "Waiting for you to pick a screen — click to cancel" if sharer is not None else "Share your screen"
+            )
+        count = len(self._share_watchers)
+        self.share_badge.set_visible(live)
+        self.share_badge.set_label(f"LIVE · {count} watching" if count else "LIVE")
+        self.share_badge.set_tooltip_text(", ".join(self._share_watchers) or "Nobody is watching yet")
+
+    def _on_screen_watch(self, obj: dict) -> None:
+        sharer = self._sharer  # paho's thread: read once, it may be cleared meanwhile
+        if sharer is not None:
+            sharer.handle_watch(obj)
+
+    def _on_screen_frame(self, header: dict, chunk: bytes) -> None:
+        viewer = self._viewers.get(header.get("share_id"))
+        if viewer is not None:
+            viewer.add_chunk(header, chunk)
+
+    def _handle_screen_state(self, device_id: str, data: Optional[dict]) -> None:
+        if device_id == self.cfg.device_id:
+            return
+        previous = self._shares.get(device_id)
+        if not data or not data.get("share_id"):
+            if previous:
+                self._end_share(device_id)
+            return
+        if previous and previous["share_id"] == data["share_id"]:
+            return
+        if previous:
+            self._end_share(device_id)
+        share = {"share_id": data["share_id"], "nick": data.get("nick", "?"), "from": device_id}
+        self._shares[device_id] = share
+        self._append_screen_card(share)
+        self._refresh_peer_list()
+        # Share state is retained, so one left behind by a sharer who crashed
+        # shows up on connect too — drop it if they don't turn out to be online.
+        GLib.timeout_add_seconds(int(PeerDirectory.DEBOUNCE_SECONDS) + 2, self._verify_share, device_id, share["share_id"])
+        if time.time() - data.get("ts", 0) < 30:  # a share that's been going a while isn't news
+            _notify(share["nick"], "started sharing their screen")
+
+    def _verify_share(self, device_id: str, share_id: str) -> bool:
+        share = self._shares.get(device_id)
+        if share and share["share_id"] == share_id and device_id not in self.peers.snapshot():
+            self._end_share(device_id)
+        return False
+
+    def _append_screen_card(self, share: dict) -> None:
+        icon = Gtk.Image(icon_name="video-display-symbolic", pixel_size=20, css_classes=["file-icon"])
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        info.append(Gtk.Label(label="Sharing their screen", xalign=0, css_classes=["heading"]))
+        status = Gtk.Label(label="Live now", xalign=0, css_classes=["caption", "stamp"])
+        info.append(status)
+        watch_btn = Gtk.Button(label="Watch", valign=Gtk.Align.CENTER, css_classes=["suggested-action", "pill"])
+        watch_btn.connect("clicked", lambda _b: self._open_viewer(share["from"]))
+        bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
+        bubble.append(icon)
+        bubble.append(info)
+        bubble.append(watch_btn)
+        share["card_status"], share["card_button"] = status, watch_btn
+        self._append_bubble(bubble, nick=share["nick"], ts=time.time(), is_mine=False)
+
+    def _end_share(self, device_id: str) -> None:
+        share = self._shares.pop(device_id, None)
+        if share is None:
+            return
+        share["card_status"].set_label("Ended")
+        share["card_button"].set_sensitive(False)
+        viewer = self._viewers.get(share["share_id"])
+        if viewer is not None:
+            viewer.show_ended()
+        self._refresh_peer_list()
+
+    def _open_viewer(self, device_id: str) -> None:
+        share = self._shares.get(device_id)
+        if share is None:
+            return
+        viewer = self._viewers.get(share["share_id"])
+        if viewer is None:
+            viewer = ScreenViewerWindow(self, share)
+            self._viewers[share["share_id"]] = viewer
+        viewer.present()
+
+    def _stop_screen_sharing_and_viewing(self) -> None:
+        if self._sharer is not None:
+            self._sharer.stop()
+        for viewer in list(self._viewers.values()):
+            viewer.close()
+        for device_id in list(self._shares):
+            self._end_share(device_id)
+
     # -- settings --------------------------------------------------------
 
     def _on_open_settings(self, _widget) -> None:
@@ -1584,6 +2267,26 @@ class RelayWindow(Adw.ApplicationWindow):
         chat_group.add(history_days_row)
         page.add(chat_group)
 
+        window_group = Adw.PreferencesGroup(title="Window")
+        lock_row = Adw.SwitchRow(
+            title="Lock window size",
+            subtitle="No resizing, maximizing, or fullscreen — the window floats on Hyprland",
+        )
+        lock_row.set_active(self.cfg.lock_window_size)
+        window_group.add(lock_row)
+        width_row = Adw.SpinRow.new_with_range(360, 7680, 10)
+        width_row.set_title("Width")
+        height_row = Adw.SpinRow.new_with_range(420, 4320, 10)
+        height_row.set_title("Height")
+        # While unlocked these follow the window's current size, so locking
+        # keeps the window exactly as it is unless you change them.
+        width_row.set_value(self.cfg.window_width if self.cfg.lock_window_size else self.get_width())
+        height_row.set_value(self.cfg.window_height if self.cfg.lock_window_size else self.get_height())
+        for row in (width_row, height_row):
+            lock_row.bind_property("active", row, "sensitive", GObject.BindingFlags.SYNC_CREATE)
+            window_group.add(row)
+        page.add(window_group)
+
         remote_group = Adw.PreferencesGroup(
             title="Remote Commands",
             description="Let trusted peers trigger fixed commands on this machine.",
@@ -1632,6 +2335,9 @@ class RelayWindow(Adw.ApplicationWindow):
                 show_presence=presence_row.get_active(),
                 history_retain_count=int(history_count_row.get_value()),
                 history_retain_days=history_days_row.get_value(),
+                lock_window_size=lock_row.get_active(),
+                window_width=int(width_row.get_value()),
+                window_height=int(height_row.get_value()),
             )
             if not new_cfg.broker_host or not new_cfg.network_name or not new_cfg.passphrase:
                 toasts.add_toast(Adw.Toast(title="Host, network name, and passphrase are required"))
@@ -1642,12 +2348,18 @@ class RelayWindow(Adw.ApplicationWindow):
             needs_reconnect = any(
                 getattr(new_cfg, field) != getattr(self.cfg, field) for field in _RECONNECT_FIELDS
             )
+            window_changed = any(
+                getattr(new_cfg, field) != getattr(self.cfg, field)
+                for field in ("lock_window_size", "window_width", "window_height")
+            )
             if needs_reconnect:
                 self._apply_new_config(new_cfg)
             else:
                 self.cfg = new_cfg
                 self.receiver.cfg = new_cfg
                 self.toast_overlay.add_toast(Adw.Toast(title="Settings saved"))
+            if window_changed:
+                self._apply_window_lock()
 
         def on_export(_btn) -> None:
             network_name = network_name_row.get_text().strip()
@@ -1880,6 +2592,8 @@ class RelayWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _apply_new_config(self, new_cfg: Config) -> None:
+        # Shares and viewers belong to the old network/connection.
+        self._stop_screen_sharing_and_viewing()
         self.client.disconnect()
 
         self.cfg = new_cfg
@@ -1888,6 +2602,7 @@ class RelayWindow(Adw.ApplicationWindow):
             GLib.source_remove(expiry)
         self._typing_peers.clear()
         self._typing_sent_at = 0.0
+        self._render_typing()
         self.receiver = FileReceiver(new_cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
         self.action_handler = RemoteActionHandler(new_cfg, on_handled=self._threaded(self._on_action_handled))
         self.client = RelayClient(new_cfg)
@@ -1907,6 +2622,155 @@ class RelayWindow(Adw.ApplicationWindow):
         threading.Thread(target=self._connect_worker, daemon=True).start()
 
 
+_hyprland_lua: Optional[bool] = None  # whether this Hyprland takes Lua dispatchers; probed once
+
+
+def _hyprctl(args: list[str]) -> Optional[str]:
+    try:
+        return subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=2, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _hyprctl_json(what: str):
+    try:
+        return json.loads(_hyprctl(["-j", what]) or "")
+    except ValueError:
+        return None
+
+
+def _hyprland_event_socket() -> Optional[str]:
+    signature, runtime_dir = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"), os.environ.get("XDG_RUNTIME_DIR")
+    if not signature or not runtime_dir:
+        return None
+    path = Path(runtime_dir) / "hypr" / signature / ".socket2.sock"
+    return str(path) if path.exists() else None
+
+
+def _lua_dispatch(dispatcher: str, **fields) -> str:
+    args = ", ".join(f"{key} = {json.dumps(value)}" for key, value in fields.items())
+    return f"hl.dispatch(hl.dsp.{dispatcher}({{ {args} }}))"
+
+
+def _hyprland_dispatch(lua: list[str], legacy: list[str]) -> None:
+    """Lua-configured Hyprland only accepts dispatchers as hl.dispatch()
+    calls, rejecting the classic `dispatch setfloating address:…` strings;
+    older releases only understand those classic strings."""
+    global _hyprland_lua
+    if _hyprland_lua is None:
+        _hyprland_lua = (_hyprctl(["repl", "return 1"]) or "").strip() == "1"
+    if _hyprland_lua:
+        if lua:
+            _hyprctl(["eval", "\n".join(lua)])
+    elif legacy:
+        _hyprctl(["--batch", " ; ".join(f"dispatch {command}" for command in legacy)])
+
+
+class ScreenViewerWindow(Adw.Window):
+    """A peer's shared screen. An open viewer is what keeps the sharer
+    sending: it heartbeats every few seconds, and closing it stops that."""
+
+    def __init__(self, relay: RelayWindow, share: dict):
+        super().__init__(
+            application=relay.get_application(),
+            title=f"{share['nick']}'s screen",
+            default_width=1024,
+            default_height=640,
+        )
+        self.relay = relay
+        self.share_id = share["share_id"]
+        self.sharer_device_id = share["from"]
+        self._assembler = screenshare.FrameAssembler()
+        self._lock = threading.Lock()
+        self._pending_texture: Optional[Gdk.Texture] = None
+        self._redraw_scheduled = False
+        self._stopped = False
+
+        self.title_widget = Adw.WindowTitle(title=self.get_title(), subtitle="Connecting…")
+        header = Adw.HeaderBar(title_widget=self.title_widget)
+
+        waiting = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        waiting.append(Adw.Spinner(width_request=32, height_request=32))
+        waiting.append(Gtk.Label(label=f"Waiting for {share['nick']}'s screen…", css_classes=["dim-label"]))
+        self.picture = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, css_classes=["screen-viewer"])
+        ended = Adw.StatusPage(
+            icon_name="video-display-symbolic",
+            title="Screen share ended",
+            description=f"{share['nick']} stopped sharing.",
+        )
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.stack.add_named(waiting, "waiting")
+        self.stack.add_named(self.picture, "live")
+        self.stack.add_named(ended, "ended")
+
+        view = Adw.ToolbarView(content=self.stack)
+        view.add_top_bar(header)
+        self.set_content(view)
+        self.connect("close-request", self._on_close_request)
+
+        relay.client.watch_screen(self.share_id)
+        self._send_heartbeat()
+        self._heartbeat_id = GLib.timeout_add_seconds(screenshare.WATCH_HEARTBEAT_SECONDS, self._send_heartbeat)
+
+    def add_chunk(self, header: dict, chunk: bytes) -> None:
+        """Called on paho's network thread. Decodes finished frames right
+        there, and only ever hands the newest one to the GTK thread."""
+        frame = self._assembler.add(header, chunk)
+        if frame is None or self._stopped:
+            return
+        try:
+            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(frame[0]))
+        except GLib.Error:
+            return
+        with self._lock:
+            self._pending_texture = texture
+            if self._redraw_scheduled:
+                return
+            self._redraw_scheduled = True
+        GLib.idle_add(self._show_pending_frame)
+
+    def _show_pending_frame(self) -> bool:
+        with self._lock:
+            texture, self._pending_texture = self._pending_texture, None
+            self._redraw_scheduled = False
+        if texture is not None and not self._stopped:
+            self.picture.set_paintable(texture)
+            if self.stack.get_visible_child_name() != "live":
+                self.stack.set_visible_child_name("live")
+                self.title_widget.set_subtitle("Live")
+        return False
+
+    def show_ended(self) -> None:
+        self._stop()
+        self.stack.set_visible_child_name("ended")
+        self.title_widget.set_subtitle("Ended")
+
+    def _send_heartbeat(self, state: str = "watching") -> bool:
+        if self._stopped:
+            return False
+        client = self.relay.client
+        if client.connected.is_set():
+            client.send_screen_watch(
+                self.sharer_device_id,
+                {"share_id": self.share_id, "from": self.relay.cfg.device_id, "nick": self.relay.cfg.nickname, "state": state},
+            )
+        return True
+
+    def _stop(self) -> None:
+        if self._stopped:
+            return
+        self._send_heartbeat("stopped")
+        self._stopped = True
+        GLib.source_remove(self._heartbeat_id)
+        self.relay.client.unwatch_screen(self.share_id)
+        if self.relay._viewers.get(self.share_id) is self:
+            del self.relay._viewers[self.share_id]
+
+    def _on_close_request(self, _window) -> bool:
+        self._stop()
+        return False
+
+
 class RelayApp(Adw.Application):
     def __init__(self, cfg: Config):
         super().__init__(application_id="net.omarchy.Relay")
@@ -1923,6 +2787,7 @@ class RelayApp(Adw.Application):
 
     def _on_shutdown(self, _app: "RelayApp") -> None:
         if self.window is not None:
+            self.window._stop_screen_sharing_and_viewing()
             self.window.client.disconnect()
 
     def _on_activate(self, app: "RelayApp") -> None:
@@ -1938,6 +2803,7 @@ class RelayApp(Adw.Application):
             return
         self.window = RelayWindow(app, self.cfg)
         self.window.present()
+        self.window.maybe_show_whats_new()
 
 
 def run_gui(cfg: Config) -> None:

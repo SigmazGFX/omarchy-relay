@@ -202,9 +202,28 @@ files land in `transfer.downloads_dir` alongside received ones.
 **`/sparkles`**: any message containing this word sets off a five-second
 pixie-dust burst on every client that renders it, sender included.
 
-**Typing status**: while someone is typing in `gui`, the chat header says
-so ("Alice is typing…"), and their sidebar row shows "typing…". `chat` and
-`chat --tui` neither send nor show it.
+**Typing status**: while someone is typing in `gui`, three bouncing dots
+show in a bubble at the bottom of the chat (with their name) and under
+their name in the sidebar, and the chat header says so ("Alice is
+typing…"). `chat` and `chat --tui` neither send nor show it.
+
+**Coffee**: `/coffee` buys everyone a virtual cup of coffee, `/coffee
+<nickname> [note]` sends one to one person, and every other name in the
+sidebar has a ☕ button. It lands as a coffee card (reactions work on it
+like any message) with a steaming cup popping up over the window, and is
+kept in message history. Older clients, `chat`, and `chat --tui` show it as
+an ordinary message ("☕ sent you a cup of coffee").
+
+**What's New**: the main menu's **What's New** lists what changed in each
+release, and it opens by itself once after an update. Release notes live
+in `omarchy_relay/release_notes.py`.
+
+**Lock window size**: Settings → Window keeps the chat window at a fixed
+width × height (defaulting to its current size) — no resizing, maximizing,
+or fullscreen, including from compositor keybindings. On Hyprland a
+tiled window is resized by the layout regardless of what it asks for, so
+locking also floats the window (via `hyprctl`) and centers it; unlocking
+tiles it again.
 
 **Closing the window keeps you connected**: it hides into the background,
 so you stay online and still get notifications and dings. The bar icon or
@@ -235,6 +254,37 @@ journalctl --user -fu omarchy-relay-daemon   # watch chat/file activity
 
 Useful on a headless machine, or any device you want reachable for file
 transfers without keeping a chat window open.
+
+## Screen sharing
+
+In `gui`, the display button in the chat header shares a monitor or a
+window — the desktop's own screen-share picker (xdg-desktop-portal; on
+Omarchy, xdg-desktop-portal-hyprland) asks which. Everyone on the network
+gets a "Sharing their screen" card with a **Watch** button, plus a screen
+button next to the sharer in the sidebar. While you share, the header
+shows **LIVE** and how many people are watching; the same button stops it.
+
+- **Several at once:** each device's share is independent, so any number
+  of people can share at the same time. Every share you open gets its own
+  viewer window, so you can watch several while sharing your own.
+- **Only while watched:** frames go out only while at least one viewer
+  window is open. Viewers heartbeat every 3 seconds and the sharer stops
+  sending 10 seconds after the last one — an unwatched share costs a single
+  retained message.
+- **Format:** JPEG stills scaled to fit 1280px wide, at most 3 a second,
+  encrypted like everything else — roughly 50–150 KB a frame, depending on
+  what's on screen. Nothing beyond gst-plugins-base and gdk-pixbuf is
+  needed. Tune it in the config:
+
+  ```toml
+  [screen_share]
+  fps = 3
+  max_width = 1280
+  quality = 60   # JPEG quality, 10–95
+  ```
+
+Screen sharing is `gui`-only; `chat`, `chat --tui`, and `daemon` don't
+show or send it.
 
 ## Remote actions
 
@@ -319,13 +369,17 @@ nothing here equivalent to a remote shell.
 - `transfer.chunk_size` defaults to 64 KB of plaintext per chunk (~87 KB on
   the wire after encoding). Lower it if your broker enforces a smaller
   max packet size.
+- A watched screen share at the defaults is about 150–450 KB/s of broker
+  traffic per share (not per viewer — the broker fans frames out). Lower
+  `screen_share.fps`, `max_width`, or `quality` for a metered or public
+  broker.
 
 ## Repo layout
 
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
                     presence, remote_actions, chat, cli, tui, gui, audio,
-                    history, network_share)
+                    history, network_share, screenshare, release_notes)
 install.sh          installs deps (pacman) + the omarchy-relay launcher
 uninstall.sh
 scripts/            one-shot quickstart installers (see Quickstart above)

@@ -11,6 +11,7 @@ across threads, so this relies on that discipline rather than locking.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -29,7 +30,9 @@ CREATE TABLE IF NOT EXISTS messages (
     nick TEXT NOT NULL,
     text TEXT NOT NULL,
     is_dm INTEGER NOT NULL,
-    peer_device_id TEXT
+    peer_device_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'text',
+    extra TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_network_ts ON messages (network, ts);
 """
@@ -40,6 +43,14 @@ class HistoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
         self._conn.executescript(_SCHEMA)
+        # kind ("text", "coffee") and extra (JSON with whatever else that
+        # kind's renderer needs) arrived in 0.2.0. Older databases get them
+        # added in place, and their existing rows read back as plain text.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(messages)")}
+        if "kind" not in columns:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+        if "extra" not in columns:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN extra TEXT")
         self._conn.commit()
 
     def add_message(
@@ -52,11 +63,13 @@ class HistoryStore:
         text: str,
         is_dm: bool,
         peer_device_id: Optional[str],
+        kind: str = "text",
+        extra: Optional[dict] = None,
     ) -> None:
         self._conn.execute(
-            "INSERT OR IGNORE INTO messages (id, network, ts, from_device, nick, text, is_dm, peer_device_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (msg_id, network, ts, from_device, nick, text, int(is_dm), peer_device_id),
+            "INSERT OR IGNORE INTO messages (id, network, ts, from_device, nick, text, is_dm, peer_device_id, kind, extra) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (msg_id, network, ts, from_device, nick, text, int(is_dm), peer_device_id, kind, json.dumps(extra) if extra else None),
         )
         self._conn.commit()
 
@@ -64,17 +77,16 @@ class HistoryStore:
         """Oldest-first, ready to replay through the same render path as
         live messages. `limit` caps how many of the most recent are
         returned (None = everything stored for this network)."""
+        columns = "id, ts, from_device, nick, text, is_dm, peer_device_id, kind, extra"
         if limit:
             rows = self._conn.execute(
-                "SELECT id, ts, from_device, nick, text, is_dm, peer_device_id FROM messages "
-                "WHERE network = ? ORDER BY ts DESC LIMIT ?",
+                f"SELECT {columns} FROM messages WHERE network = ? ORDER BY ts DESC LIMIT ?",
                 (network, limit),
             ).fetchall()
             rows.reverse()
         else:
             rows = self._conn.execute(
-                "SELECT id, ts, from_device, nick, text, is_dm, peer_device_id FROM messages "
-                "WHERE network = ? ORDER BY ts ASC",
+                f"SELECT {columns} FROM messages WHERE network = ? ORDER BY ts ASC",
                 (network,),
             ).fetchall()
         return [
@@ -86,6 +98,8 @@ class HistoryStore:
                 "text": r[4],
                 "is_dm": bool(r[5]),
                 "peer_device_id": r[6],
+                "kind": r[7] or "text",
+                "extra": json.loads(r[8]) if r[8] else {},
             }
             for r in rows
         ]
