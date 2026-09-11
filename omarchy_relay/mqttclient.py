@@ -88,6 +88,7 @@ class RelayClient:
         self.on_file_meta: Optional[Callable[[dict], None]] = None
         self.on_file_chunk: Optional[Callable[[dict], None]] = None
         self.on_action_request: Optional[Callable[[dict], None]] = None
+        self.on_agent_message: Optional[Callable[[dict], None]] = None
         self.on_typing: Optional[Callable[[dict], None]] = None
         self.on_bad_message: Optional[Callable[[str, Exception], None]] = None
 
@@ -138,6 +139,9 @@ class RelayClient:
     def send_action_result(self, target_device_id: str, obj: dict) -> None:
         self._publish_encrypted(f"{self.ns}/action-result/{target_device_id}", obj)
 
+    def send_agent_message(self, target_device_id: str, obj: dict) -> None:
+        self._publish_encrypted(f"{self.ns}/agent/{target_device_id}", obj)
+
     def _publish_encrypted(self, topic: str, obj: dict, qos: int = 1, retain: bool = False) -> None:
         token = self.cipher.encrypt(json.dumps(obj).encode("utf-8"))
         self._client.publish(topic, payload=token, qos=qos, retain=retain)
@@ -157,6 +161,7 @@ class RelayClient:
                 (f"{self.ns}/file/+/chunk", 1),
                 (f"{self.ns}/action/{self.cfg.device_id}", 1),
                 (f"{self.ns}/action-result/{self.cfg.device_id}", 1),
+                (f"{self.ns}/agent/{self.cfg.device_id}", 1),
             ]
         )
         self._publish_presence()
@@ -189,6 +194,8 @@ class RelayClient:
                 self._dispatch_encrypted(msg.payload, self.on_action_request)
             elif topic == f"{self.ns}/action-result/{self.cfg.device_id}":
                 self._dispatch_encrypted(msg.payload, self.pending_actions.resolve)
+            elif topic == f"{self.ns}/agent/{self.cfg.device_id}":
+                self._dispatch_encrypted(msg.payload, self.on_agent_message)
         except (InvalidToken, ValueError, KeyError) as exc:
             # Wrong passphrase, foreign traffic sharing the broker, or a
             # malformed message — drop it rather than crash the listener.

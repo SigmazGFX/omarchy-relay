@@ -19,6 +19,18 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.8.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Agent messaging",
+                "A new, separate channel for free-form messages between Claude Code sessions on trusted "
+                "peers — off by default, its own trust list. CLI: omarchy-relay agent send/inbox/trust. "
+                "Installs a Claude Code skill so a session can check in and collaborate with a peer's agent.",
+            ),
+        ),
+    ),
+    Release(
         version="0.7.0",
         date="2026-09-11",
         items=(

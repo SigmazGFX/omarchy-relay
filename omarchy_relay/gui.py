@@ -38,6 +38,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango  # 
 
 from . import audio, history, network_share, release_notes
 from .chat import _ding, _notify
+from .agents import AgentMailbox, AgentMessageHandler
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
@@ -683,6 +684,8 @@ class RelayWindow(Adw.ApplicationWindow):
         # device_id), and the broker disconnects whichever held it first —
         # a flapping loop, not redundancy. One connection does everything.
         self.action_handler = RemoteActionHandler(cfg, on_handled=self._threaded(self._on_action_handled))
+        self.agent_mailbox = AgentMailbox()
+        self.agent_handler = AgentMessageHandler(cfg, self.agent_mailbox, on_received=self._threaded(self._on_agent_received))
 
         self._connection_state = "connecting"
         # Message grouping: whose bubble came last, when, and the bubble
@@ -1001,6 +1004,9 @@ class RelayWindow(Adw.ApplicationWindow):
         # command takes. Only the on_handled callback above (which does
         # touch a widget) needs the main-loop marshalling.
         self.client.on_action_request = lambda obj: self.action_handler.handle_request(self.client, obj)
+        # Same reasoning: handle_message only does sqlite writes (its own
+        # on_received callback is separately wrapped in _threaded above).
+        self.client.on_agent_message = self.agent_handler.handle_message
         self.peers.on_removed = self._threaded(self._handle_peer_removed)
 
     # -- thread marshalling ------------------------------------------------
@@ -1563,6 +1569,10 @@ class RelayWindow(Adw.ApplicationWindow):
         nick = request_obj.get("nick", "?")
         action = request_obj.get("action", "?")
         self._append_system(f"{nick} triggered '{action}' ({outcome})")
+
+    def _on_agent_received(self, obj: dict) -> None:
+        nick = obj.get("nick", obj.get("from", "?"))
+        self._append_system(f"agent message from {nick} (see: omarchy-relay agent inbox)")
 
     def _handle_typing(self, obj: dict) -> None:
         device_id = obj.get("from")
@@ -2869,6 +2879,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._render_typing()
         self.receiver = FileReceiver(new_cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
         self.action_handler = RemoteActionHandler(new_cfg, on_handled=self._threaded(self._on_action_handled))
+        self.agent_handler = AgentMessageHandler(new_cfg, self.agent_mailbox, on_received=self._threaded(self._on_agent_received))
         self.client = RelayClient(new_cfg)
         self._wire_client_callbacks()
 

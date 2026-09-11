@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .agents import AgentMailbox, AgentMessageHandler, send_agent_message
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
@@ -19,6 +20,7 @@ Commands:
   /msg <nick> <text>     send a direct message
   /send <path> [nick]    send a file (broadcast, or DM if nick given)
   /action <nick> <name>  run a named remote action on that peer (if they've granted you access)
+  /agent <nick> <text>   send an agent message (if they've granted your agent access)
   /help                  show this help
   /quit                  leave
 Anything else is sent as a broadcast chat message.\
@@ -91,10 +93,18 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
 
     action_handler = RemoteActionHandler(cfg, on_handled=on_action_handled)
 
+    def on_agent_received(obj):
+        print_line(f"* [agent] {obj.get('nick', obj.get('from', '?'))}: {obj.get('text', '')}")
+
+    mailbox = AgentMailbox()
+    agent_handler = AgentMessageHandler(cfg, mailbox, on_received=on_agent_received)
+
     client.on_chat = on_chat
     client.on_dm = on_dm
     client.on_presence = on_presence
     client.on_action_request = lambda obj: action_handler.handle_request(client, obj)
+    client.on_agent_message = agent_handler.handle_message
+    client.agent_mailbox = mailbox
     return client
 
 
@@ -195,6 +205,18 @@ def run_chat(cfg: Config) -> None:
                         print(f"[stderr] {result['stderr'].rstrip(chr(10))}")
                 else:
                     print(f"! {result.get('error', 'unknown error')}")
+            elif line.startswith("/agent "):
+                rest = line[len("/agent ") :]
+                if " " not in rest:
+                    print("usage: /agent <nick> <text>")
+                    continue
+                nick, text = rest.split(" ", 1)
+                target = peers.resolve(nick)
+                if not target:
+                    print(f"no such peer online: {nick}")
+                    continue
+                send_agent_message(client, cfg, client.agent_mailbox, target, nick, text)
+                print(f"* sent agent message to {nick}")
             elif line.startswith("/"):
                 print(f"unknown command: {line}  (try /help)")
             else:

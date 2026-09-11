@@ -43,6 +43,12 @@ class Config:
     # below reads this straight from the file, not from this default), so
     # removing/renaming it sticks.
     remote_actions_commands: dict = dataclasses.field(default_factory=lambda: {"status": "uptime"})
+    # Agent-to-agent messaging, off by default. Separate trust table from
+    # remote_actions_peers on purpose: trusting a peer's agent to exchange
+    # free-form messages with yours is a different grant than trusting it to
+    # trigger your named shell commands. See agents.py.
+    agents_enabled: bool = False
+    agents_peers: dict = dataclasses.field(default_factory=dict)  # device_id -> "none"|"agent"
     # Display preference: show "X is online"/"X went offline" lines in the
     # chat log. Peer list/sidebar accuracy is unaffected either way.
     show_presence: bool = True
@@ -72,6 +78,7 @@ class Config:
         broker = data.get("broker", {})
         transfer = data.get("transfer", {})
         remote_actions = data.get("remote_actions", {})
+        agents = data.get("agents", {})
         ui = data.get("ui", {})
         cfg = cls(
             nickname=identity.get("nickname") or socket.gethostname(),
@@ -89,6 +96,8 @@ class Config:
             remote_actions_enabled=remote_actions.get("enabled", False),
             remote_actions_peers=dict(remote_actions.get("peers", {})),
             remote_actions_commands=dict(remote_actions.get("commands", {})),
+            agents_enabled=agents.get("enabled", False),
+            agents_peers=dict(agents.get("peers", {})),
             show_presence=ui.get("show_presence", True),
             history_retain_count=ui.get("history_retain_count", 200),
             history_retain_days=ui.get("history_retain_days", 0),
@@ -146,6 +155,12 @@ enabled = {"true" if self.remote_actions_enabled else "false"}
 
 [remote_actions.commands]
 {_toml_table(self.remote_actions_commands)}
+
+[agents]
+enabled = {"true" if self.agents_enabled else "false"}
+
+[agents.peers]
+{_toml_table(self.agents_peers)}
 
 [ui]
 show_presence = {"true" if self.show_presence else "false"}

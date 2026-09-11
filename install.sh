@@ -37,6 +37,16 @@ mkdir -p "$DESKTOP_DIR"
 cp "$REPO_DIR/packaging/omarchy-relay.desktop" "$DESKTOP_DIR/"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
+# Claude Code skill: lets a Claude session on this machine check in with and
+# message a Claude session on a trusted peer over the agent channel (see
+# `omarchy-relay agent`). Trust/enablement is still a separate, explicit
+# step (omarchy-relay agent trust ...) — installing the skill alone does
+# nothing until that's granted.
+SKILLS_DIR="$HOME/.agents/skills/omarchy-relay"
+echo "==> Installing Claude Code skill to $SKILLS_DIR"
+mkdir -p "$SKILLS_DIR"
+cp "$REPO_DIR/skills/omarchy-relay/SKILL.md" "$SKILLS_DIR/"
+
 # Bar icon (Omarchy shell only): left of the AI-agents icon, focuses the
 # window if it's already running or launches it fresh otherwise. Only
 # touches shell.json on an actual Omarchy system (needs the shell's own

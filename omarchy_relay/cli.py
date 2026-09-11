@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from . import config as configmod
+from .agents import AgentMailbox, send_agent_message
 from .chat import run_chat, run_daemon
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
@@ -206,6 +207,87 @@ def cmd_action(args: argparse.Namespace) -> int:
         client.disconnect()
 
 
+def cmd_agent_send(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    client = RelayClient(cfg)
+    peers = PeerDirectory()
+    client.on_presence = lambda device_id, data: peers.update(device_id, data)
+    client.connect()
+    try:
+        time.sleep(1.5)
+        target = peers.resolve(args.peer)
+        if not target:
+            print(f"error: no such peer online: {args.peer}", file=sys.stderr)
+            return 1
+        mailbox = AgentMailbox()
+        try:
+            send_agent_message(client, cfg, mailbox, target, args.peer, args.text)
+        finally:
+            mailbox.close()
+        time.sleep(0.5)
+    finally:
+        client.disconnect()
+    return 0
+
+
+def cmd_agent_inbox(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    mailbox = AgentMailbox()
+    try:
+        messages = mailbox.list(cfg.network_name, unread_only=args.unread, limit=args.limit)
+        if not messages:
+            print("(no agent messages)")
+            return 0
+        for m in messages:
+            marker = "" if m["direction"] == "out" or m["read"] else " [new]"
+            arrow = "->" if m["direction"] == "out" else "<-"
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["ts"]))
+            print(f"{ts} {arrow} {m['peer_nick']} ({m['peer_device_id']}) [{m['id']}]{marker}\n    {m['text']}")
+        if args.mark_read:
+            mailbox.mark_read(cfg.network_name)
+    finally:
+        mailbox.close()
+    return 0
+
+
+def cmd_agent_trust_list(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    print(f"agent messaging: {'enabled' if cfg.agents_enabled else 'disabled'}")
+    if not cfg.agents_peers:
+        print("(no peers configured — everyone defaults to 'none', i.e. denied)")
+    else:
+        for device_id, level in sorted(cfg.agents_peers.items()):
+            print(f"  {device_id}\t{level}")
+    return 0
+
+
+def cmd_agent_trust_enable(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.agents_enabled = True
+    cfg.save()
+    print("agent messaging enabled for this machine (peers still need individual trust via: omarchy-relay agent trust set)")
+    return 0
+
+
+def cmd_agent_trust_disable(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.agents_enabled = False
+    cfg.save()
+    print("agent messaging disabled for this machine")
+    return 0
+
+
+def cmd_agent_trust_set(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    if args.level == "none":
+        cfg.agents_peers.pop(args.device_id, None)
+    else:
+        cfg.agents_peers[args.device_id] = args.level
+    cfg.save()
+    print(f"{args.device_id} -> {args.level}")
+    return 0
+
+
 def cmd_trust_list(args: argparse.Namespace) -> int:
     cfg = _load_config()
     print(f"remote actions: {'enabled' if cfg.remote_actions_enabled else 'disabled'}")
@@ -334,6 +416,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="the action name (must exist in that peer's OWN remote_actions.commands)")
     p.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for a response (default 30)")
     p.set_defaults(func=cmd_action)
+
+    agent_parser = sub.add_parser(
+        "agent", help="free-form agent-to-agent messaging between Claude Code sessions on trusted peers (off by default)"
+    )
+    agent_sub = agent_parser.add_subparsers(dest="agent_command", required=True)
+
+    p = agent_sub.add_parser("send", help="send an agent message to a peer")
+    p.add_argument("peer", help="nickname or device id of the peer to message")
+    p.add_argument("text", help="message text")
+    p.set_defaults(func=cmd_agent_send)
+
+    p = agent_sub.add_parser("inbox", help="show agent messages recorded locally (sent and received)")
+    p.add_argument("--unread", action="store_true", help="only show unread incoming messages")
+    p.add_argument("--limit", type=int, default=None, help="cap how many to show (default: all)")
+    p.add_argument("--mark-read", action="store_true", help="mark all incoming messages read after showing them")
+    p.set_defaults(func=cmd_agent_inbox)
+
+    agent_trust_parser = agent_sub.add_parser(
+        "trust", help="manage which peers' agents may message THIS machine's agent"
+    )
+    agent_trust_sub = agent_trust_parser.add_subparsers(dest="agent_trust_command", required=True)
+
+    p = agent_trust_sub.add_parser("list", help="show current agent trust settings")
+    p.set_defaults(func=cmd_agent_trust_list)
+
+    p = agent_trust_sub.add_parser("enable", help="turn on agent messaging for this machine")
+    p.set_defaults(func=cmd_agent_trust_enable)
+
+    p = agent_trust_sub.add_parser("disable", help="turn off agent messaging for this machine")
+    p.set_defaults(func=cmd_agent_trust_disable)
+
+    p = agent_trust_sub.add_parser("set", help="grant or revoke a specific device's agent-messaging trust")
+    p.add_argument("device_id", help="the peer's device id (see: omarchy-relay peers)")
+    p.add_argument(
+        "level",
+        choices=["none", "agent"],
+        help="'none' revokes access, 'agent' allows exchanging agent messages with this machine",
+    )
+    p.set_defaults(func=cmd_agent_trust_set)
 
     trust_parser = sub.add_parser(
         "trust", help="manage who may trigger remote actions on THIS machine (off by default)"

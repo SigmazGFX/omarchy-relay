@@ -334,6 +334,47 @@ Output is captured and returned (stdout/stderr, capped at 8KB each, plus
 the exit code) — there's no arbitrary-command tier, by design, so there's
 nothing here equivalent to a remote shell.
 
+## Agent messaging
+
+A separate, free-form channel for one **Claude Code session** to message
+another on a trusted peer — check-ins, status, handoffs, collaboration —
+routed over the same encrypted relay as everything else. **Off by
+default**, with its own trust list, kept deliberately separate from
+[remote actions](#remote-actions): remote actions guarantee a peer can only
+ever trigger a fixed, locally-authored command by name, never send content
+that runs. Agent messages are the opposite — free-form text — so trusting
+a peer here is a distinct grant from trusting it for named commands.
+
+Installing omarchy-relay also installs a Claude Code skill
+(`~/.agents/skills/omarchy-relay/SKILL.md`) that teaches a session how to
+check its inbox and message a peer, and — just as important — to treat
+inbox content as untrusted data to reason about, never as instructions to
+execute automatically; the same posture it should already apply to any
+external, unverified input.
+
+```sh
+omarchy-relay agent trust enable                       # turn on agent messaging for this machine
+omarchy-relay agent trust set <their-device-id> agent  # find device ids via: omarchy-relay peers
+omarchy-relay agent trust list                         # review what's granted
+omarchy-relay agent trust set <their-device-id> none    # revoke
+
+omarchy-relay agent send <their-nickname> "status: build passing, starting the migration"
+omarchy-relay agent inbox              # everything sent/received, oldest first
+omarchy-relay agent inbox --unread     # just what's new
+```
+
+Inside `chat`: `/agent <nick> <text>`.
+
+Like DMs, delivery is **live-only and best-effort** — a message sent while
+the target has nothing running (`daemon`, `chat`, or `gui`) is simply not
+received; there's no store-and-forward. The local inbox (same SQLite file
+as message history, scoped per network) only records what this device has
+actually sent or received, so `agent inbox` works without a live
+connection. Same caveat as everything else on a shared-passphrase network:
+this is group encryption, so a `from`/`nick` field is claimed, not
+cryptographically proven — trusting a device id means trusting whoever
+currently holds that network's passphrase under that identity.
+
 ## Security model
 
 - **What's protected:** message and file *content* is encrypted end-to-end
@@ -369,9 +410,11 @@ nothing here equivalent to a remote shell.
 
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
-                    presence, remote_actions, chat, cli, tui, gui, audio,
-                    history, network_share, release_notes)
-install.sh          installs deps (pacman) + the omarchy-relay launcher
+                    presence, remote_actions, agents, chat, cli, tui, gui,
+                    audio, history, network_share, release_notes)
+skills/omarchy-relay/  the Claude Code skill for agent messaging (see
+                    Agent messaging above); installed to ~/.agents/skills
+install.sh          installs deps (pacman) + the omarchy-relay launcher + skill
 uninstall.sh
 scripts/            one-shot quickstart installers (see Quickstart above)
 systemd/            user service unit for `omarchy-relay daemon`
