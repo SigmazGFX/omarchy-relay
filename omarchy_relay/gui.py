@@ -27,6 +27,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+from . import network_share
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
@@ -1015,6 +1016,23 @@ class RelayWindow(Adw.ApplicationWindow):
             broker_group.add(row)
         page.add(broker_group)
 
+        share_group = Adw.PreferencesGroup(
+            title="Share this network",
+            description="Network + broker details only — not your nickname or device.",
+        )
+        export_row = Adw.ActionRow(title="Export to file", subtitle="Save so someone else can import it")
+        export_btn = Gtk.Button(icon_name="document-save-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+        export_row.add_suffix(export_btn)
+        export_row.set_activatable_widget(export_btn)
+        share_group.add(export_row)
+
+        import_row = Adw.ActionRow(title="Import from file", subtitle="Fills in Network + Broker below — review, then Save")
+        import_btn = Gtk.Button(icon_name="document-open-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+        import_row.add_suffix(import_btn)
+        import_row.set_activatable_widget(import_btn)
+        share_group.add(import_row)
+        page.add(share_group)
+
         chat_group = Adw.PreferencesGroup(title="Chat")
         presence_row = Adw.SwitchRow(
             title="Show online/offline messages",
@@ -1072,6 +1090,72 @@ class RelayWindow(Adw.ApplicationWindow):
                 self.receiver.cfg = new_cfg
                 self.toast_overlay.add_toast(Adw.Toast(title="Settings saved"))
 
+        def on_export(_btn) -> None:
+            network_name = network_name_row.get_text().strip()
+            passphrase = passphrase_row.get_text()
+            broker_host = host_row.get_text().strip()
+            if not network_name or not passphrase or not broker_host:
+                toasts.add_toast(Adw.Toast(title="Network name, passphrase, and broker host are required to export"))
+                return
+            text = network_share.build_export_toml(
+                network_name,
+                passphrase,
+                broker_host,
+                int(port_row.get_value()),
+                tls_row.get_active(),
+                username_row.get_text().strip(),
+                password_row.get_text(),
+            )
+
+            file_dialog = Gtk.FileDialog(initial_name=f"{network_name}-omarchy-relay.toml")
+
+            def on_save_finish(fd: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+                try:
+                    gfile = fd.save_finish(result)
+                except GLib.Error:
+                    return  # cancelled
+                if gfile is None:
+                    return
+                path = Path(gfile.get_path())
+                try:
+                    path.write_text(text)
+                    path.chmod(0o600)
+                except OSError as exc:
+                    toasts.add_toast(Adw.Toast(title=f"Couldn't save: {exc}"))
+                    return
+                toasts.add_toast(Adw.Toast(title=f"Exported to {path.name}"))
+
+            file_dialog.save(dialog, None, on_save_finish)
+
+        def on_import(_btn) -> None:
+            file_dialog = Gtk.FileDialog()
+
+            def on_open_finish(fd: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+                try:
+                    gfile = fd.open_finish(result)
+                except GLib.Error:
+                    return  # cancelled
+                if gfile is None:
+                    return
+                path = Path(gfile.get_path())
+                try:
+                    imported = network_share.parse_export(path.read_text())
+                except (OSError, ValueError) as exc:
+                    toasts.add_toast(Adw.Toast(title=f"Couldn't import: {exc}"))
+                    return
+                network_name_row.set_text(imported["network_name"])
+                passphrase_row.set_text(imported["passphrase"])
+                host_row.set_text(imported["broker_host"])
+                port_row.set_value(imported["broker_port"])
+                tls_row.set_active(imported["broker_tls"])
+                username_row.set_text(imported["broker_username"])
+                password_row.set_text(imported["broker_password"])
+                toasts.add_toast(Adw.Toast(title="Imported — review below, then Save"))
+
+            file_dialog.open(dialog, None, on_open_finish)
+
+        export_btn.connect("clicked", on_export)
+        import_btn.connect("clicked", on_import)
         save_btn.connect("clicked", on_save)
         dialog.present(self)
 
