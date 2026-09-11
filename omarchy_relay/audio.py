@@ -24,13 +24,27 @@ Gst.init(None)
 # autoaudiosrc/autoaudiosink, which aren't installed here. Kept as its own
 # constant so a test can swap in a synthetic source without duplicating the
 # rest of the pipeline.
-RECORD_SOURCE = "pipewiresrc"
+# min-buffers defaults to 1 — essentially no cushion against scheduling
+# jitter. Latency doesn't matter here (this is an offline recording, not a
+# live call), so there's no downside to giving PipeWire a much bigger
+# buffering margin.
+RECORD_SOURCE = "pipewiresrc min-buffers=8"
 # The two `queue` elements put the live capture, the encoding, and the
 # file write on separate threads. Without them, a hiccup anywhere
 # downstream (encoder scheduling, disk I/O) stalls the capture thread
 # too, which is heard as jitter/dropouts in the recording.
+#
+# opusenc: audio-type=voice tunes Opus for speech rather than mixed/music
+# content; complexity 10 (the default) is the most CPU-expensive setting
+# available and buys little for voice specifically, so it's lowered along
+# with the bitrate — both reduce the encoder's per-frame CPU cost, which
+# gives the scheduler more slack against the same jitter the queues and
+# min-buffers are targeting from the buffering side. 24 kbps is comfortably
+# enough for clear speech.
 _RECORD_REST = (
-    "queue ! audioconvert ! audioresample ! opusenc ! queue ! oggmux ! filesink name=sink"
+    "queue ! audioconvert ! audioresample ! "
+    "opusenc audio-type=voice bitrate=24000 complexity=5 ! "
+    "queue ! oggmux ! filesink name=sink"
 )
 
 
