@@ -2506,7 +2506,10 @@ class RelayWindow(Adw.ApplicationWindow):
         # -- Trusted peers ----------------------------------------------------
         trust_group = Adw.PreferencesGroup(
             title="Trusted Peers",
-            description="Only these devices may trigger the named commands below.",
+            description=(
+                "Only these devices may trigger the named commands below — except "
+                "'status', which any peer on the network may run as a connectivity check."
+            ),
         )
         page.add(trust_group)
         trust_rows: list[Adw.ActionRow] = []
@@ -2585,7 +2588,8 @@ class RelayWindow(Adw.ApplicationWindow):
                 commands_group.remove(row)
             command_rows.clear()
             for name, shell_cmd in sorted(self.cfg.remote_actions_commands.items()):
-                row = Adw.ActionRow(title=name, subtitle=shell_cmd)
+                subtitle = f"{shell_cmd}  ·  any peer" if name == "status" else shell_cmd
+                row = Adw.ActionRow(title=name, subtitle=subtitle)
                 remove_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
 
                 def on_remove(_b, nm: str = name) -> None:

@@ -9,10 +9,12 @@ shell.
 
 Off by default (remote_actions.enabled = false). Even when enabled, a
 peer not explicitly listed in remote_actions.peers as "commands" is
-refused — the default trust level for any unlisted device_id is "none".
-The receiving machine's own config is always the sole authority over
-what runs on it; nothing about how a request is granted can be
-influenced by the sender.
+refused — the default trust level for any unlisted device_id is "none" —
+except for the "status" action (see _ALWAYS_ALLOWED below), which any
+peer on the encrypted network may run without being listed, so it can
+double as a connectivity smoke test. The receiving machine's own config
+is always the sole authority over what runs on it; nothing about how a
+request is granted can be influenced by the sender.
 """
 from __future__ import annotations
 
@@ -23,6 +25,13 @@ from typing import Callable, Optional
 
 _MAX_OUTPUT = 8192
 _RUN_TIMEOUT = 20
+
+# Actions any peer may trigger regardless of remote_actions.peers trust
+# level — still gated by remote_actions.enabled and by the action having
+# to be present in remote_actions.commands. "status" ships pre-populated
+# (config.py) specifically so it works as an out-of-the-box "is the
+# remote comms tool working" probe.
+_ALWAYS_ALLOWED = {"status"}
 
 
 def _truncate(s: str) -> str:
@@ -56,12 +65,12 @@ class RemoteActionHandler:
             self._reply(client, requester, result, obj, "disabled")
             return
 
-        if self.trust_level(requester) != "commands":
+        name = obj.get("action", "")
+        if name not in _ALWAYS_ALLOWED and self.trust_level(requester) != "commands":
             result.update(ok=False, error="no remote-action permission granted to this device")
             self._reply(client, requester, result, obj, "denied")
             return
 
-        name = obj.get("action", "")
         shell_cmd = self.cfg.remote_actions_commands.get(name)
         if shell_cmd is None:
             result.update(ok=False, error=f"no such action: {name!r}")
