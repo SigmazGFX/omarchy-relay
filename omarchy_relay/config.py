@@ -60,11 +60,6 @@ class Config:
     # The newest release whose notes this user has seen — "What's New" opens
     # by itself once whenever the running version is newer than this.
     last_seen_version: str = ""
-    # Screen sharing: frames are JPEG stills, scaled to fit max_width and
-    # sent at most `fps` times a second, only while someone is watching.
-    screen_share_fps: int = 3
-    screen_share_max_width: int = 1280
-    screen_share_quality: int = 60
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
@@ -78,7 +73,6 @@ class Config:
         transfer = data.get("transfer", {})
         remote_actions = data.get("remote_actions", {})
         ui = data.get("ui", {})
-        screen_share = data.get("screen_share", {})
         cfg = cls(
             nickname=identity.get("nickname") or socket.gethostname(),
             device_id=identity.get("device_id") or default_device_id(),
@@ -102,9 +96,6 @@ class Config:
             window_width=ui.get("window_width", 900),
             window_height=ui.get("window_height", 640),
             last_seen_version=ui.get("last_seen_version", ""),
-            screen_share_fps=screen_share.get("fps", 3),
-            screen_share_max_width=screen_share.get("max_width", 1280),
-            screen_share_quality=screen_share.get("quality", 60),
         )
         if not cfg.broker_host:
             raise ValueError(
@@ -164,11 +155,6 @@ lock_window_size = {"true" if self.lock_window_size else "false"}
 window_width = {self.window_width}
 window_height = {self.window_height}
 last_seen_version = {s(self.last_seen_version)}
-
-[screen_share]
-fps = {self.screen_share_fps}
-max_width = {self.screen_share_max_width}
-quality = {self.screen_share_quality}
 """
 
 

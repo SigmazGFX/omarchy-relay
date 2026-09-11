@@ -19,15 +19,19 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
-        version="0.3.0",
+        version="0.4.0",
         date="2026-09-11",
         items=(
             (
-                "Talk while screen sharing",
-                "Everyone in a screen share can talk: use the microphone button in the viewer window, or "
-                "next to LIVE while you share. Microphones start muted, and echo cancellation keeps the "
-                "others from hearing themselves through your speakers.",
+                "Screen sharing removed",
+                "Screen sharing and talking during a share are gone. Voice messages still work as before.",
             ),
+        ),
+    ),
+    Release(
+        version="0.3.0",
+        date="2026-09-11",
+        items=(
             (
                 "Coffee by command only",
                 "The cup buttons next to names are gone. Send a coffee with /coffee <nickname> [note], or "
@@ -39,11 +43,6 @@ RELEASES: tuple[Release, ...] = (
         version="0.2.0",
         date="2026-09-11",
         items=(
-            (
-                "Screen sharing",
-                "Share a monitor or window with everyone on the network from the button in the chat header. "
-                "Viewers open it from the chat, and nothing is sent while nobody is watching.",
-            ),
             (
                 "Send a coffee",
                 "Treat someone to a virtual cup of coffee: the cup button next to their name in the online "

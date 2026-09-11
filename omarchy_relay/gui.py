@@ -34,7 +34,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from . import audio, history, network_share, release_notes, screenshare, voice
+from . import audio, history, network_share, release_notes
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
@@ -277,19 +277,6 @@ button.send-button {
 .coffee-steam.steam-1 { animation-delay: 0.35s; }
 .coffee-steam.steam-2 { animation-delay: 0.6s; }
 .coffee-steam.steam-3 { animation-delay: 0.85s; }
-
-/* Screen sharing. */
-.live-badge {
-  background-color: #e01b24;
-  color: #ffffff;
-  border-radius: 6px;
-  padding: 1px 7px;
-  font-size: 0.8em;
-  font-weight: bold;
-}
-.screen-viewer {
-  background-color: #000000;
-}
 """
 
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?")
@@ -516,11 +503,6 @@ def _typing_dots(small: bool = False) -> Gtk.Box:
     return box
 
 
-def _sync_mic_button(button: Gtk.ToggleButton, on: bool) -> None:
-    button.set_icon_name("audio-input-microphone-symbolic" if on else "microphone-sensitivity-muted-symbolic")
-    button.set_tooltip_text("Mute your microphone" if on else "Unmute your microphone")
-
-
 def _fmt_release_date(date: str) -> str:
     try:
         return time.strftime("%B %-d, %Y", time.strptime(date, "%Y-%m-%d"))
@@ -576,12 +558,6 @@ class RelayWindow(Adw.ApplicationWindow):
         self._typing_sent_at = 0.0  # monotonic time we last told peers we're typing; 0 = we aren't
         self._typing_peers: dict[str, tuple[str, int]] = {}  # device_id -> (nick, expiry GLib source id)
         self._coffee_active = False
-        self._sharer: Optional[screenshare.ScreenSharer] = None
-        self._share_watchers: list[str] = []  # nicks currently watching our share
-        self._share_voice: Optional[voice.VoiceSession] = None  # our share's voice room
-        self._share_talkers: list[str] = []  # nicks talking in our share's voice room right now
-        self._shares: dict[str, dict] = {}  # device_id -> a peer's live share: share_id, nick, its chat card's widgets
-        self._viewers: dict[str, ScreenViewerWindow] = {}  # share_id -> open viewer window
         self._hyprland_lock = threading.Lock()
         self._hyprland_floated = False  # the window lock floated the window, so unlocking tiles it again
         self._hyprland_watch: Optional[socket.socket] = None  # Hyprland's event socket, followed while locked
@@ -671,15 +647,6 @@ class RelayWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.title_widget = Adw.WindowTitle(title=self.cfg.network_name)
         header.set_title_widget(self.title_widget)
-        self.share_btn = Gtk.Button(icon_name="video-display-symbolic", tooltip_text="Share your screen")
-        self.share_btn.connect("clicked", self._on_share_clicked)
-        header.pack_end(self.share_btn)
-        self.share_mic_btn = Gtk.ToggleButton(visible=False)
-        _sync_mic_button(self.share_mic_btn, False)
-        self.share_mic_btn.connect("toggled", self._on_share_mic_toggled)
-        header.pack_end(self.share_mic_btn)
-        self.share_badge =Gtk.Label(label="LIVE", visible=False, valign=Gtk.Align.CENTER, css_classes=["live-badge"])
-        header.pack_end(self.share_badge)
 
         self.banner = Adw.Banner(title="Couldn't reach the broker", button_label="Settings")
         self.banner.connect("button-clicked", self._on_open_settings)
@@ -852,12 +819,6 @@ class RelayWindow(Adw.ApplicationWindow):
         # touch a widget) needs the main-loop marshalling.
         self.client.on_action_request = lambda obj: self.action_handler.handle_request(self.client, obj)
         self.peers.on_removed = self._threaded(self._handle_peer_removed)
-        self.client.on_screen_state = self._threaded(self._handle_screen_state)
-        # Neither of these touches GTK directly, and frames arrive several
-        # times a second — they stay on paho's thread (see the methods).
-        self.client.on_screen_watch = self._on_screen_watch
-        self.client.on_screen_frame = self._on_screen_frame
-        self.client.on_screen_audio = self._on_screen_audio
 
     # -- thread marshalling ------------------------------------------------
 
@@ -1179,15 +1140,6 @@ class RelayWindow(Adw.ApplicationWindow):
             box = Gtk.Box(spacing=10, margin_top=3, margin_bottom=3)
             box.append(avatar)
             box.append(labels)
-            if device_id in self._shares:
-                watch_btn = Gtk.Button(
-                    icon_name="video-display-symbolic",
-                    tooltip_text=f"Watch {nick}'s screen",
-                    valign=Gtk.Align.CENTER,
-                    css_classes=["flat", "circular"],
-                )
-                watch_btn.connect("clicked", lambda _b, d=device_id: self._open_viewer(d))
-                box.append(watch_btn)
             self.peer_list.append(Gtk.ListBoxRow(child=box, activatable=False, selectable=False))
         self._update_status()
 
@@ -1304,8 +1256,6 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _handle_peer_removed(self, device_id: str, last_known: dict) -> None:
         self._clear_typing(device_id)
-        if device_id in self._shares:
-            self._end_share(device_id)
         if self.cfg.show_presence:
             self._append_system(f"{last_known.get('nick', device_id)} went offline")
         self._refresh_peer_list()
@@ -2040,192 +1990,6 @@ class RelayWindow(Adw.ApplicationWindow):
                         True, self.cfg.window_width, self.cfg.window_height, title, recenter=False
                     )
 
-    # -- screen sharing ----------------------------------------------------
-
-    def _on_share_clicked(self, _button) -> None:
-        if self._sharer is not None:
-            # Also cancels a share that's still waiting on the picker.
-            self._sharer.stop("You stopped sharing your screen" if self._sharer.active else "")
-            return
-        if not self.client.connected.is_set():
-            self.toast_overlay.add_toast(Adw.Toast(title="Not connected"))
-            return
-        self._share_watchers = []
-        self._sharer = screenshare.ScreenSharer(
-            self.client,
-            self.cfg,
-            on_started=self._on_share_started,
-            on_watchers_changed=self._on_share_watchers,
-            on_ended=self._on_share_ended,
-        )
-        self._update_share_ui()
-        self._sharer.start()
-
-    def _on_share_started(self) -> None:
-        self._append_system("You're sharing your screen — nothing is sent until someone opens it")
-        sharer = self._sharer
-        self._share_voice = voice.VoiceSession(
-            self.client,
-            self.cfg,
-            sharer.share_id,
-            on_talking_changed=self._on_share_talking,
-            on_error=self._on_share_voice_error,
-            on_warning=lambda message: self.toast_overlay.add_toast(Adw.Toast(title=message)),
-            should_send=lambda: bool(sharer.watcher_nicks()),  # nobody to talk to until someone watches
-        )
-        self._update_share_ui()
-
-    def _on_share_watchers(self, nicks: list[str]) -> None:
-        previous = set(self._share_watchers)
-        for nick in nicks:
-            if nick not in previous:
-                self._append_system(f"{nick} is watching your screen")
-        for nick in sorted(previous - set(nicks)):
-            self._append_system(f"{nick} stopped watching")
-        self._share_watchers = nicks
-        self._update_share_ui()
-
-    def _on_share_ended(self, reason: str) -> None:
-        self._sharer = None
-        self._share_watchers = []
-        if self._share_voice is not None:
-            self._share_voice.close()
-            self._share_voice = None
-        self._share_talkers = []
-        self.share_mic_btn.set_active(False)
-        if reason:
-            self._append_system(reason)
-        self._update_share_ui()
-
-    def _update_share_ui(self) -> None:
-        sharer = self._sharer
-        live = sharer is not None and sharer.active
-        self.share_btn.set_icon_name("media-playback-stop-symbolic" if live else "video-display-symbolic")
-        if live:
-            self.share_btn.add_css_class("recording")
-            self.share_btn.set_tooltip_text("Stop sharing your screen")
-        else:
-            self.share_btn.remove_css_class("recording")
-            self.share_btn.set_tooltip_text(
-                "Waiting for you to pick a screen — click to cancel" if sharer is not None else "Share your screen"
-            )
-        count = len(self._share_watchers)
-        badge = ["LIVE"]
-        if count:
-            badge.append(f"{count} watching")
-        if self._share_talkers:
-            badge.append(f"{', '.join(self._share_talkers)} talking")
-        self.share_badge.set_visible(live)
-        self.share_badge.set_label(" · ".join(badge))
-        self.share_mic_btn.set_visible(live)
-        self.share_badge.set_tooltip_text(", ".join(self._share_watchers) or "Nobody is watching yet")
-
-    def _on_screen_watch(self, obj: dict) -> None:
-        sharer = self._sharer  # paho's thread: read once, it may be cleared meanwhile
-        if sharer is not None:
-            sharer.handle_watch(obj)
-
-    def _on_screen_frame(self, header: dict, chunk: bytes) -> None:
-        viewer = self._viewers.get(header.get("share_id"))
-        if viewer is not None:
-            viewer.add_chunk(header, chunk)
-
-    def _on_screen_audio(self, header: dict, packet: bytes) -> None:
-        # paho's thread, 25 packets a second per talker: straight to the room.
-        share_id = header.get("share_id")
-        session = self._share_voice
-        if session is not None and session.share_id == share_id:
-            session.handle_packet(header, packet)
-            return
-        viewer = self._viewers.get(share_id)
-        if viewer is not None:
-            viewer.voice.handle_packet(header, packet)
-
-    def _on_share_mic_toggled(self, button: Gtk.ToggleButton) -> None:
-        if self._share_voice is not None:
-            self._share_voice.set_mic(button.get_active())  # a failure comes back through _on_share_voice_error
-        _sync_mic_button(button, button.get_active())
-
-    def _on_share_talking(self, nicks: list[str]) -> None:
-        self._share_talkers = nicks
-        self._update_share_ui()
-
-    def _on_share_voice_error(self, message: str) -> None:
-        self.toast_overlay.add_toast(Adw.Toast(title=f"Microphone stopped: {message}"))
-        self.share_mic_btn.set_active(False)
-
-    def _handle_screen_state(self, device_id: str, data: Optional[dict]) -> None:
-        if device_id == self.cfg.device_id:
-            return
-        previous = self._shares.get(device_id)
-        if not data or not data.get("share_id"):
-            if previous:
-                self._end_share(device_id)
-            return
-        if previous and previous["share_id"] == data["share_id"]:
-            return
-        if previous:
-            self._end_share(device_id)
-        share = {"share_id": data["share_id"], "nick": data.get("nick", "?"), "from": device_id}
-        self._shares[device_id] = share
-        self._append_screen_card(share)
-        self._refresh_peer_list()
-        # Share state is retained, so one left behind by a sharer who crashed
-        # shows up on connect too — drop it if they don't turn out to be online.
-        GLib.timeout_add_seconds(int(PeerDirectory.DEBOUNCE_SECONDS) + 2, self._verify_share, device_id, share["share_id"])
-        if time.time() - data.get("ts", 0) < 30:  # a share that's been going a while isn't news
-            _notify(share["nick"], "started sharing their screen")
-
-    def _verify_share(self, device_id: str, share_id: str) -> bool:
-        share = self._shares.get(device_id)
-        if share and share["share_id"] == share_id and device_id not in self.peers.snapshot():
-            self._end_share(device_id)
-        return False
-
-    def _append_screen_card(self, share: dict) -> None:
-        icon = Gtk.Image(icon_name="video-display-symbolic", pixel_size=20, css_classes=["file-icon"])
-        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
-        info.append(Gtk.Label(label="Sharing their screen", xalign=0, css_classes=["heading"]))
-        status = Gtk.Label(label="Live now", xalign=0, css_classes=["caption", "stamp"])
-        info.append(status)
-        watch_btn = Gtk.Button(label="Watch", valign=Gtk.Align.CENTER, css_classes=["suggested-action", "pill"])
-        watch_btn.connect("clicked", lambda _b: self._open_viewer(share["from"]))
-        bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
-        bubble.append(icon)
-        bubble.append(info)
-        bubble.append(watch_btn)
-        share["card_status"], share["card_button"] = status, watch_btn
-        self._append_bubble(bubble, nick=share["nick"], ts=time.time(), is_mine=False)
-
-    def _end_share(self, device_id: str) -> None:
-        share = self._shares.pop(device_id, None)
-        if share is None:
-            return
-        share["card_status"].set_label("Ended")
-        share["card_button"].set_sensitive(False)
-        viewer = self._viewers.get(share["share_id"])
-        if viewer is not None:
-            viewer.show_ended()
-        self._refresh_peer_list()
-
-    def _open_viewer(self, device_id: str) -> None:
-        share = self._shares.get(device_id)
-        if share is None:
-            return
-        viewer = self._viewers.get(share["share_id"])
-        if viewer is None:
-            viewer = ScreenViewerWindow(self, share)
-            self._viewers[share["share_id"]] = viewer
-        viewer.present()
-
-    def _stop_screen_sharing_and_viewing(self) -> None:
-        if self._sharer is not None:
-            self._sharer.stop()
-        for viewer in list(self._viewers.values()):
-            viewer.close()
-        for device_id in list(self._shares):
-            self._end_share(device_id)
-
     # -- settings --------------------------------------------------------
 
     def _on_open_settings(self, _widget) -> None:
@@ -2639,8 +2403,6 @@ class RelayWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _apply_new_config(self, new_cfg: Config) -> None:
-        # Shares and viewers belong to the old network/connection.
-        self._stop_screen_sharing_and_viewing()
         self.client.disconnect()
 
         self.cfg = new_cfg
@@ -2713,162 +2475,6 @@ def _hyprland_dispatch(lua: list[str], legacy: list[str]) -> None:
         _hyprctl(["--batch", " ; ".join(f"dispatch {command}" for command in legacy)])
 
 
-class ScreenViewerWindow(Adw.Window):
-    """A peer's shared screen. An open viewer is what keeps the sharer
-    sending: it heartbeats every few seconds, and closing it stops that."""
-
-    def __init__(self, relay: RelayWindow, share: dict):
-        super().__init__(
-            application=relay.get_application(),
-            title=f"{share['nick']}'s screen",
-            default_width=1024,
-            default_height=640,
-        )
-        self.relay = relay
-        self.share_id = share["share_id"]
-        self.sharer_device_id = share["from"]
-        self._assembler = screenshare.FrameAssembler()
-        self._lock = threading.Lock()
-        self._pending_texture: Optional[Gdk.Texture] = None
-        self._redraw_scheduled = False
-        self._stopped = False
-
-        self.title_widget = Adw.WindowTitle(title=self.get_title(), subtitle="Connecting…")
-        header = Adw.HeaderBar(title_widget=self.title_widget)
-        # Voice: everyone in this share can talk. The mic starts muted; the
-        # others are heard unless the speaker button is switched off.
-        self.mic_btn = Gtk.ToggleButton()
-        _sync_mic_button(self.mic_btn, False)
-        self.mic_btn.connect("toggled", self._on_mic_toggled)
-        self.listen_btn = Gtk.ToggleButton(
-            active=True, icon_name="audio-volume-high-symbolic", tooltip_text="Mute everyone in this share"
-        )
-        self.listen_btn.connect("toggled", self._on_listen_toggled)
-        header.pack_end(self.mic_btn)
-        header.pack_end(self.listen_btn)
-        self._live = False
-        self._talkers: list[str] = []
-
-        waiting = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
-        waiting.append(Adw.Spinner(width_request=32, height_request=32))
-        waiting.append(Gtk.Label(label=f"Waiting for {share['nick']}'s screen…", css_classes=["dim-label"]))
-        self.picture = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, css_classes=["screen-viewer"])
-        ended = Adw.StatusPage(
-            icon_name="video-display-symbolic",
-            title="Screen share ended",
-            description=f"{share['nick']} stopped sharing.",
-        )
-        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        self.stack.add_named(waiting, "waiting")
-        self.stack.add_named(self.picture, "live")
-        self.stack.add_named(ended, "ended")
-
-        self.toasts = Adw.ToastOverlay(child=self.stack)
-        view = Adw.ToolbarView(content=self.toasts)
-        view.add_top_bar(header)
-        self.set_content(view)
-        self.connect("close-request", self._on_close_request)
-
-        relay.client.watch_screen(self.share_id)
-        self.voice = voice.VoiceSession(
-            relay.client,
-            relay.cfg,
-            self.share_id,
-            on_talking_changed=self._on_talking_changed,
-            on_error=self._on_voice_error,
-            on_warning=lambda message: self.toasts.add_toast(Adw.Toast(title=message)),
-        )
-        self._send_heartbeat()
-        self._heartbeat_id = GLib.timeout_add_seconds(screenshare.WATCH_HEARTBEAT_SECONDS, self._send_heartbeat)
-
-    def add_chunk(self, header: dict, chunk: bytes) -> None:
-        """Called on paho's network thread. Decodes finished frames right
-        there, and only ever hands the newest one to the GTK thread."""
-        frame = self._assembler.add(header, chunk)
-        if frame is None or self._stopped:
-            return
-        try:
-            texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(frame[0]))
-        except GLib.Error:
-            return
-        with self._lock:
-            self._pending_texture = texture
-            if self._redraw_scheduled:
-                return
-            self._redraw_scheduled = True
-        GLib.idle_add(self._show_pending_frame)
-
-    def _show_pending_frame(self) -> bool:
-        with self._lock:
-            texture, self._pending_texture = self._pending_texture, None
-            self._redraw_scheduled = False
-        if texture is not None and not self._stopped:
-            self.picture.set_paintable(texture)
-            if self.stack.get_visible_child_name() != "live":
-                self.stack.set_visible_child_name("live")
-                self._live = True
-                self._update_subtitle()
-        return False
-
-    def _update_subtitle(self) -> None:
-        parts = ["Live" if self._live else "Connecting…"]
-        if self._talkers:
-            parts.append(f"{', '.join(self._talkers)} talking")
-        self.title_widget.set_subtitle(" · ".join(parts))
-
-    def _on_talking_changed(self, nicks: list[str]) -> None:
-        self._talkers = nicks
-        if not self._stopped:
-            self._update_subtitle()
-
-    def _on_mic_toggled(self, button: Gtk.ToggleButton) -> None:
-        self.voice.set_mic(button.get_active())  # a failure comes back through _on_voice_error
-        _sync_mic_button(button, button.get_active())
-
-    def _on_listen_toggled(self, button: Gtk.ToggleButton) -> None:
-        on = button.get_active()
-        self.voice.set_listening(on)
-        button.set_icon_name("audio-volume-high-symbolic" if on else "audio-volume-muted-symbolic")
-        button.set_tooltip_text("Mute everyone in this share" if on else "Hear everyone in this share")
-
-    def _on_voice_error(self, message: str) -> None:
-        self.toasts.add_toast(Adw.Toast(title=f"Microphone stopped: {message}"))
-        self.mic_btn.set_active(False)
-
-    def show_ended(self) -> None:
-        self._stop()
-        self.stack.set_visible_child_name("ended")
-        self.title_widget.set_subtitle("Ended")
-
-    def _send_heartbeat(self, state: str = "watching") -> bool:
-        if self._stopped:
-            return False
-        client = self.relay.client
-        if client.connected.is_set():
-            client.send_screen_watch(
-                self.sharer_device_id,
-                {"share_id": self.share_id, "from": self.relay.cfg.device_id, "nick": self.relay.cfg.nickname, "state": state},
-            )
-        return True
-
-    def _stop(self) -> None:
-        if self._stopped:
-            return
-        self._send_heartbeat("stopped")
-        self._stopped = True
-        GLib.source_remove(self._heartbeat_id)
-        self.relay.client.unwatch_screen(self.share_id)
-        self.voice.close()
-        self.mic_btn.set_sensitive(False)
-        self.listen_btn.set_sensitive(False)
-        if self.relay._viewers.get(self.share_id) is self:
-            del self.relay._viewers[self.share_id]
-
-    def _on_close_request(self, _window) -> bool:
-        self._stop()
-        return False
-
-
 class RelayApp(Adw.Application):
     def __init__(self, cfg: Config):
         super().__init__(application_id="net.omarchy.Relay")
@@ -2885,7 +2491,6 @@ class RelayApp(Adw.Application):
 
     def _on_shutdown(self, _app: "RelayApp") -> None:
         if self.window is not None:
-            self.window._stop_screen_sharing_and_viewing()
             self.window.client.disconnect()
 
     def _on_activate(self, app: "RelayApp") -> None:

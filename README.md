@@ -255,57 +255,6 @@ journalctl --user -fu omarchy-relay-daemon   # watch chat/file activity
 Useful on a headless machine, or any device you want reachable for file
 transfers without keeping a chat window open.
 
-## Screen sharing
-
-In `gui`, the display button in the chat header shares a monitor or a
-window — the desktop's own screen-share picker (xdg-desktop-portal; on
-Omarchy, xdg-desktop-portal-hyprland) asks which. Everyone on the network
-gets a "Sharing their screen" card with a **Watch** button, plus a screen
-button next to the sharer in the sidebar. While you share, the header
-shows **LIVE** and how many people are watching; the same button stops it.
-
-- **Several at once:** each device's share is independent, so any number
-  of people can share at the same time. Every share you open gets its own
-  viewer window, so you can watch several while sharing your own.
-- **Only while watched:** frames go out only while at least one viewer
-  window is open. Viewers heartbeat every 3 seconds and the sharer stops
-  sending 10 seconds after the last one — an unwatched share costs a single
-  retained message.
-- **Voice:** everyone in a share can talk. The microphone button next to
-  **LIVE** (while sharing) or in a viewer window's header unmutes you;
-  microphones always start muted and are only captured while unmuted. A
-  viewer window's speaker button mutes everyone else, and its subtitle
-  shows who's talking. Voice is Opus at 24 kbps in 40 ms packets,
-  encrypted, QoS 0 — about 9 KB/s of broker traffic per person talking,
-  a quarter of that during silence — played through a small jitter
-  buffer, so expect a few
-  hundred milliseconds of delay through a remote broker. A sharer's audio
-  only goes out while someone is watching.
-- **Echo cancellation:** while your microphone is unmuted, the app loads
-  PipeWire's echo-cancel module (WebRTC's canceller) privately through
-  `pw-cli`: your microphone is captured through it and everyone else's
-  voices play through it, so what comes out of your speakers is removed
-  from what your microphone sends. Muted, there's nothing to cancel, so
-  it's unloaded and voices play straight to your speakers — it never holds
-  the microphone open while you're muted. Your default devices and audio
-  setup aren't touched, and the module also goes away if the app exits
-  uncleanly. If it can't be loaded, voice still works and the app tells
-  you to use headphones.
-- **Format:** JPEG stills scaled to fit 1280px wide, at most 3 a second,
-  encrypted like everything else — roughly 50–150 KB a frame, depending on
-  what's on screen. Nothing beyond gst-plugins-base and gdk-pixbuf is
-  needed. Tune it in the config:
-
-  ```toml
-  [screen_share]
-  fps = 3
-  max_width = 1280
-  quality = 60   # JPEG quality, 10–95
-  ```
-
-Screen sharing is `gui`-only; `chat`, `chat --tui`, and `daemon` don't
-show or send it.
-
 ## Remote actions
 
 A peer can ask another machine to run a **named** action over the relay —
@@ -389,18 +338,13 @@ nothing here equivalent to a remote shell.
 - `transfer.chunk_size` defaults to 64 KB of plaintext per chunk (~87 KB on
   the wire after encoding). Lower it if your broker enforces a smaller
   max packet size.
-- A watched screen share at the defaults is about 150–450 KB/s of broker
-  traffic per share (not per viewer — the broker fans frames out). Lower
-  `screen_share.fps`, `max_width`, or `quality` for a metered or public
-  broker.
 
 ## Repo layout
 
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
                     presence, remote_actions, chat, cli, tui, gui, audio,
-                    history, network_share, screenshare, voice,
-                    release_notes)
+                    history, network_share, release_notes)
 install.sh          installs deps (pacman) + the omarchy-relay launcher
 uninstall.sh
 scripts/            one-shot quickstart installers (see Quickstart above)
