@@ -1122,7 +1122,13 @@ class RelayWindow(Adw.ApplicationWindow):
             self._stop_recording()
 
     def _start_recording(self) -> None:
-        tmp_path = Path(tempfile.mkstemp(prefix="omarchy-relay-voice-", suffix=".ogg")[1])
+        # Recorded directly into downloads_dir (not the system tempdir,
+        # which is typically a separate tmpfs mount) so the later rename
+        # in _send_voice_message stays on one filesystem — os.rename()
+        # across filesystems raises OSError, which used to fail silently.
+        downloads_dir = Path(self.cfg.downloads_dir).expanduser()
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(tempfile.mkstemp(prefix="omarchy-relay-voice-", suffix=".ogg", dir=downloads_dir)[1])
         try:
             recorder = audio.Recorder(tmp_path)
             recorder.start()
@@ -1184,26 +1190,29 @@ class RelayWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _send_voice_message(self, tmp_path: Path, duration: float) -> bool:
-        if duration < 0.3 or tmp_path.stat().st_size == 0:
-            self.toast_overlay.add_toast(Adw.Toast(title="Recording too short, not sent"))
-            tmp_path.unlink(missing_ok=True)
-            return False
-        # Move it into downloads_dir (not deleted after send) so the sender
-        # has a real, stable path too — file transfers don't echo back to
-        # their own sender the way broadcast chat messages do, so without
-        # this the sender would never see or be able to replay their own
-        # voice message.
-        downloads_dir = Path(self.cfg.downloads_dir).expanduser()
-        downloads_dir.mkdir(parents=True, exist_ok=True)
-        final_path = downloads_dir / f"voice-{int(time.time())}-{uuid.uuid4().hex[:6]}.ogg"
-        tmp_path.rename(final_path)
-        duration = round(duration, 1)
+        # Runs as a GLib.idle_add callback: an uncaught exception anywhere
+        # in here doesn't crash the app or print anything a user would
+        # see — it just vanishes, which is exactly how a real bug here
+        # showed up before (a cross-filesystem rename raising OSError with
+        # zero feedback). Catch broadly and always surface something.
         try:
+            if duration < 0.3 or tmp_path.stat().st_size == 0:
+                self.toast_overlay.add_toast(Adw.Toast(title="Recording too short, not sent"))
+                tmp_path.unlink(missing_ok=True)
+                return False
+            # Renamed to a nicer name (not deleted after send) so the
+            # sender has a real, stable path too — file transfers don't
+            # echo back to their own sender the way broadcast chat
+            # messages do, so without this the sender would never see or
+            # be able to replay their own voice message.
+            final_path = tmp_path.with_name(f"voice-{int(time.time())}-{uuid.uuid4().hex[:6]}.ogg")
+            tmp_path.rename(final_path)
+            duration = round(duration, 1)
             send_file(self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration})
-        except (FileNotFoundError, ValueError) as exc:
-            self.toast_overlay.add_toast(Adw.Toast(title=str(exc)))
-            return False
-        self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path)
+            self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path)
+        except Exception as exc:
+            self.toast_overlay.add_toast(Adw.Toast(title=f"Couldn't send voice message: {exc}"))
+            tmp_path.unlink(missing_ok=True)  # no-op via missing_ok if it was already renamed
         return False
 
     def _on_attach(self, _widget) -> None:
