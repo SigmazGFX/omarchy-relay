@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.11.0",
+        date="2026-09-11",
+        items=(
+            (
+                "React to, reply to, and delete files",
+                "Files, images, and voice messages have the react, reply, and ⋯ buttons, like any message. "
+                "Deleting one leaves the saved file where it is.",
+            ),
+        ),
+    ),
+    Release(
         version="0.10.0",
         date="2026-09-11",
         items=(

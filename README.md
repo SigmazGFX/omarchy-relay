@@ -241,8 +241,9 @@ they quoted. Only the device that sent a message can edit or delete it for
 everyone — though, as with DMs, that device is claimed rather than proven,
 so anyone holding the network passphrase could pose as it. `chat`, `chat
 --tui`, and older clients show an edit as a new "(edited) …" message and a
-delete as "(deleted a message)". Files, images, and voice messages have no
-⋯ button yet.
+delete as "(deleted a message)". Files, images, and voice messages have
+the same react, reply, and ⋯ buttons (without Edit); deleting one leaves
+the saved file where it is in your downloads folder.
 
 **Coffee, cocktails, and dancers**: `/coffee`, `/cocktail`, and `/dancer`
 send one to everyone, and `/coffee <nickname> [note]` (likewise

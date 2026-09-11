@@ -649,6 +649,13 @@ def _text_extra(reply: Optional[dict], ascii_art: bool) -> Optional[dict]:
     return extra or None
 
 
+def _file_kind(meta: dict, path: Path) -> str:
+    """How a file shows in the chat and history: "voice", "image", or "file"."""
+    if meta.get("kind") == "voice" or path.suffix.lower() in _AUDIO_EXTENSIONS:
+        return "voice"
+    return "image" if path.suffix.lower() in _IMAGE_EXTENSIONS else "file"
+
+
 def _mark_edited(stamp: Gtk.Label, ts: float) -> None:
     stamp.set_label(f"edited · {_fmt_time(ts)}")
 
@@ -726,6 +733,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._message_rows: dict[str, dict] = {}  # msg_id -> the same record, while the message can still be changed
         self._message_texts: dict[str, tuple[Gtk.Label, Gtk.Label]] = {}  # msg_id -> (text, time stamp)
         self._editing: Optional[str] = None  # id of our own message being edited in the composer
+        self._voice_by_message: dict[str, dict] = {}  # msg_id -> its _voice_players entry, stopped if it's deleted
         self._sparkle_active = False
         self._recorder: Optional[audio.Recorder] = None
         self._recording_path: Optional[Path] = None
@@ -1268,8 +1276,18 @@ class RelayWindow(Adw.ApplicationWindow):
         self._last_row_was_system = True
 
     def _append_file_received(
-        self, meta: dict, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None, missing: bool = False
+        self,
+        meta: dict,
+        path: Path,
+        *,
+        ts: Optional[float] = None,
+        is_mine: Optional[bool] = None,
+        missing: bool = False,
+        **message,
     ) -> None:
+        """message: _append_bubble's msg_id, from_device, is_dm, and
+        dm_peer_device_id, which give the bubble its actions (likewise for
+        _append_voice and _append_image)."""
         ts = time.time() if ts is None else ts
         icon = Gtk.Image(icon_name="text-x-generic-symbolic", pixel_size=20, css_classes=["file-icon"])
         name = Gtk.Label(
@@ -1302,13 +1320,13 @@ class RelayWindow(Adw.ApplicationWindow):
             bubble.append(open_btn)
         if is_mine is None:
             is_mine = meta.get("nick") == self.cfg.nickname
-        self._append_bubble(bubble, nick=meta["nick"], ts=ts, is_mine=is_mine)
+        self._append_bubble(bubble, nick=meta["nick"], ts=ts, is_mine=is_mine, preview=f"📄 {meta['filename']}", **message)
 
     def _open_containing_folder(self, path: Path) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
 
     def _append_voice(
-        self, meta: dict, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None
+        self, meta: dict, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None, **message
     ) -> None:
         ts = time.time() if ts is None else ts
         play_btn = Gtk.Button(
@@ -1348,9 +1366,11 @@ class RelayWindow(Adw.ApplicationWindow):
             play_btn.set_icon_name("media-playback-stop-symbolic")
 
         play_btn.connect("clicked", on_click)
+        if message.get("msg_id"):
+            self._voice_by_message[message["msg_id"]] = state
         if is_mine is None:
             is_mine = meta.get("nick") == self.cfg.nickname
-        self._append_bubble(bubble, nick=meta["nick"], ts=ts, is_mine=is_mine)
+        self._append_bubble(bubble, nick=meta["nick"], ts=ts, is_mine=is_mine, preview="🎤 Voice message", **message)
 
     def _stop_other_voice_players(self, exclude: dict) -> None:
         for state in self._voice_players:
@@ -1362,7 +1382,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 state["reset"]()
 
     def _append_image(
-        self, nick: str, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None
+        self, nick: str, path: Path, *, ts: Optional[float] = None, is_mine: Optional[bool] = None, **message
     ) -> None:
         ts = time.time() if ts is None else ts
         if is_mine is None:
@@ -1370,7 +1390,7 @@ class RelayWindow(Adw.ApplicationWindow):
         try:
             texture = Gdk.Texture.new_from_filename(str(path))
         except GLib.Error:
-            self._append_file_received({"nick": nick, "filename": path.name}, path, ts=ts, is_mine=is_mine)
+            self._append_file_received({"nick": nick, "filename": path.name}, path, ts=ts, is_mine=is_mine, **message)
             return
         scale = min(1.0, _IMAGE_MAX_WIDTH / texture.get_width(), _IMAGE_MAX_HEIGHT / texture.get_height())
         picture = Gtk.Picture(
@@ -1392,7 +1412,7 @@ class RelayWindow(Adw.ApplicationWindow):
         )
         open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
         bubble.add_overlay(open_btn)
-        self._append_bubble(bubble, nick=nick, ts=ts, is_mine=is_mine)
+        self._append_bubble(bubble, nick=nick, ts=ts, is_mine=is_mine, preview="📷 Image", **message)
 
     def _on_image_pressed(self, _gesture, n_press: int, _x: float, _y: float, texture: Gdk.Texture, title: str) -> None:
         if n_press == 2:
@@ -1597,16 +1617,24 @@ class RelayWindow(Adw.ApplicationWindow):
             "size": extra.get("size"),
             "duration": extra.get("duration"),
         }
+        message = {
+            "msg_id": m["id"],
+            "from_device": m["from_device"],
+            "is_dm": m["is_dm"],
+            "dm_peer_device_id": m["peer_device_id"],
+        }
         path = Path(extra["path"]) if extra.get("path") else None
         if path is None or not path.is_file():
             # Deleted from downloads_dir since (or never saved): say so rather than drop it.
-            self._append_file_received(meta, path or Path(meta["filename"]), ts=m["ts"], is_mine=is_mine, missing=True)
+            self._append_file_received(
+                meta, path or Path(meta["filename"]), ts=m["ts"], is_mine=is_mine, missing=True, **message
+            )
         elif m["kind"] == "image":
-            self._append_image(m["nick"], path, ts=m["ts"], is_mine=is_mine)
+            self._append_image(m["nick"], path, ts=m["ts"], is_mine=is_mine, **message)
         elif m["kind"] == "voice":
-            self._append_voice(meta, path, ts=m["ts"], is_mine=is_mine)
+            self._append_voice(meta, path, ts=m["ts"], is_mine=is_mine, **message)
         else:
-            self._append_file_received(meta, path, ts=m["ts"], is_mine=is_mine)
+            self._append_file_received(meta, path, ts=m["ts"], is_mine=is_mine, **message)
 
     def _handle_reaction(self, obj: dict) -> None:
         target_id, emoji, device_id = obj.get("target_id"), obj.get("emoji"), obj.get("from")
@@ -1700,17 +1728,23 @@ class RelayWindow(Adw.ApplicationWindow):
         return f"{len(nicks)} people are typing…"
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
-        if meta.get("kind") == "voice" or path.suffix.lower() in _AUDIO_EXTENSIONS:
-            kind = "voice"
-            GLib.idle_add(self._append_voice, meta, path)
+        kind = _file_kind(meta, path)
+        is_dm = meta.get("to", "*") != "*"
+        # The transfer id is the file's message id, the same on every client.
+        message = {
+            "msg_id": meta["transfer_id"],
+            "from_device": meta["from"],
+            "is_dm": is_dm,
+            "dm_peer_device_id": meta["from"] if is_dm else None,
+        }
+        if kind == "voice":
+            GLib.idle_add(lambda: self._append_voice(meta, path, **message) or False)
             _notify("Voice message", f"from {meta['nick']}")
-        elif path.suffix.lower() in _IMAGE_EXTENSIONS:
-            kind = "image"
-            GLib.idle_add(self._append_image, meta["nick"], path)
+        elif kind == "image":
+            GLib.idle_add(lambda: self._append_image(meta["nick"], path, **message) or False)
             _notify("File received", f"{meta['filename']} from {meta['nick']}")
         else:
-            kind = "file"
-            GLib.idle_add(self._append_file_received, meta, path)
+            GLib.idle_add(lambda: self._append_file_received(meta, path, **message) or False)
             _notify("File received", f"{meta['filename']} from {meta['nick']}")
         self._remember_file(kind, meta["transfer_id"], meta, path)
         _ding()
@@ -2074,7 +2108,9 @@ class RelayWindow(Adw.ApplicationWindow):
             transfer_id, _chunks = send_file(
                 self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration}
             )
-            self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path, is_mine=True)
+            self._append_voice(
+                {"nick": self.cfg.nickname, "duration": duration}, final_path, is_mine=True, msg_id=transfer_id
+            )
             self._remember_sent_file("voice", transfer_id, final_path, duration=duration)
         except Exception as exc:
             self.toast_overlay.add_toast(Adw.Toast(title=f"Couldn't send voice message: {exc}"))
@@ -2094,10 +2130,21 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         path = Path(gfile.get_path())
         try:
-            send_file(self.client, self.cfg, path, to="*")
-            self._append_system(f"Sending {path.name}…")
+            transfer_id, _chunks = send_file(self.client, self.cfg, path, to="*")
         except (FileNotFoundError, ValueError) as exc:
             self._append_system(str(exc))
+            return
+        # Our own files aren't echoed back to us, so show and keep this one
+        # here, as a pasted image or voice message is.
+        kind = _file_kind({}, path)
+        if kind == "image":
+            self._append_image(self.cfg.nickname, path, is_mine=True, msg_id=transfer_id)
+        elif kind == "voice":
+            self._append_voice({"nick": self.cfg.nickname}, path, is_mine=True, msg_id=transfer_id)
+        else:
+            meta = {"nick": self.cfg.nickname, "filename": path.name, "size": path.stat().st_size}
+            self._append_file_received(meta, path, is_mine=True, msg_id=transfer_id)
+        self._remember_sent_file(kind, transfer_id, path)
 
     def _on_entry_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
         if keyval == Gdk.KEY_Escape and (self._reply_to is not None or self._editing is not None):
@@ -2143,7 +2190,7 @@ class RelayWindow(Adw.ApplicationWindow):
         # Our own broadcast files are deliberately not echoed back to us
         # (FileReceiver skips its own sender), so without this we'd never
         # see the image we just sent in our own chat.
-        self._append_image(self.cfg.nickname, path, is_mine=True)
+        self._append_image(self.cfg.nickname, path, is_mine=True, msg_id=transfer_id)
         self._remember_sent_file("image", transfer_id, path)
 
     # -- snipping ----------------------------------------------------------
@@ -2376,6 +2423,11 @@ class RelayWindow(Adw.ApplicationWindow):
         """Drops what lets a message be reacted to, replied to, edited, or deleted."""
         for state in (self._message_meta, self._message_rows, self._message_texts, self._reaction_slots, self._reactions):
             state.pop(msg_id, None)
+        voice = self._voice_by_message.pop(msg_id, None)
+        if voice is not None:
+            if voice["player"] is not None and voice["player"].playing:
+                voice["player"].stop()
+            self._voice_players.remove(voice)
         if self._editing == msg_id or (self._reply_to or {}).get("id") == msg_id:
             self._cancel_reply()
 
