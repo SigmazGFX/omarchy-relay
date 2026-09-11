@@ -569,6 +569,11 @@ _SPARKLE_STEP_MS = 50
 # /coffee, /cocktail, /dancer: how long the animation stays up over the window.
 _TREAT_BURST_MS = 2900
 
+# Messages the broker held while we were offline arrive in a rush on
+# reconnect; their one summary notification waits until this long passes
+# without another.
+_BACKLOG_SETTLE_MS = 1500
+
 # Replies quote the start of the message they answer: a preview, not a copy.
 _REPLY_PREVIEW_CHARS = 200
 
@@ -782,6 +787,9 @@ class RelayWindow(Adw.ApplicationWindow):
         self._message_texts: dict[str, tuple[Gtk.Label, Gtk.Label]] = {}  # msg_id -> (text, time stamp)
         self._editing: Optional[str] = None  # id of our own message being edited in the composer
         self._voice_by_message: dict[str, dict] = {}  # msg_id -> its _voice_players entry, stopped if it's deleted
+        self._backlog_count = 0  # messages held for us while offline, not yet summed up in a notification
+        self._backlog_mentions = 0
+        self._backlog_timer: Optional[int] = None
         self._sparkle_active = False
         self._recorder: Optional[audio.Recorder] = None
         self._recording_path: Optional[Path] = None
@@ -1505,6 +1513,39 @@ class RelayWindow(Adw.ApplicationWindow):
 
     # -- RelayClient callbacks (already marshalled onto the GTK thread) ----
 
+    def _alert(self, obj: dict, summary: str, body: str, *, mention: bool = False) -> None:
+        """Notifies and dings for something that arrived. What the broker held
+        while we were offline gets one summary instead, once it stops coming."""
+        if self.client.is_backlog(obj):
+            self._backlog_count += 1
+            self._backlog_mentions += int(mention)
+            if self._backlog_timer is not None:
+                GLib.source_remove(self._backlog_timer)
+            self._backlog_timer = GLib.timeout_add(_BACKLOG_SETTLE_MS, self._flush_backlog)
+            return
+        _notify(summary, body, urgent=mention)
+        _ding()
+
+    def _flush_backlog(self) -> bool:
+        count, mentions = self._backlog_count, self._backlog_mentions
+        self._backlog_count = self._backlog_mentions = 0
+        self._backlog_timer = None
+        if count:
+            body = f"{count} message{'s' if count != 1 else ''} while you were away"
+            if mentions:
+                body += f", {mentions} mentioning you"
+            _notify("Omarchy Relay", body, urgent=bool(mentions))
+            _ding()
+        return False
+
+    def _seen(self, obj: dict) -> bool:
+        """A message already shown or kept, delivered again (QoS 1 is at
+        least once, and a reconnecting session can resend)."""
+        msg_id = obj.get("id")
+        if not msg_id:
+            return False
+        return msg_id in self._message_bubbles or self.history.has_message(self.cfg.network_name, msg_id)
+
     def _handle_chat(self, obj: dict) -> None:
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
@@ -1514,6 +1555,8 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         if obj.get("type") == "delete":
             self._handle_delete(obj)
+            return
+        if self._seen(obj):
             return
         if obj.get("type") in _TREATS:
             self._handle_treat(_TREATS[obj["type"]], obj, is_dm=False)
@@ -1536,11 +1579,10 @@ class RelayWindow(Adw.ApplicationWindow):
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
             if _mentions(obj["text"], self.cfg.nickname):
-                # Stays on screen until dismissed, unlike an ordinary message's.
-                _notify(f"{obj['nick']} mentioned you", obj["text"], urgent=True)
+                # Urgent, so it stays on screen until dismissed.
+                self._alert(obj, f"{obj['nick']} mentioned you", obj["text"], mention=True)
             else:
-                _notify(obj["nick"], obj["text"])
-            _ding()
+                self._alert(obj, obj["nick"], obj["text"])
 
     def _handle_dm(self, obj: dict) -> None:
         if obj.get("type") == "reaction":
@@ -1551,6 +1593,8 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         if obj.get("type") == "delete":
             self._handle_delete(obj)
+            return
+        if self._seen(obj):
             return
         if obj.get("type") in _TREATS:
             self._handle_treat(_TREATS[obj["type"]], obj, is_dm=True)
@@ -1568,8 +1612,7 @@ class RelayWindow(Adw.ApplicationWindow):
             from_device=obj.get("from"),
         )
         self._remember(obj, is_dm=True, peer_device_id=obj.get("from"), extra=_text_extra(reply, ascii_art))
-        _notify(f"DM from {obj['nick']}", obj["text"])
-        _ding()
+        self._alert(obj, f"DM from {obj['nick']}", obj["text"])
 
     def _remember(
         self,
@@ -1734,8 +1777,7 @@ class RelayWindow(Adw.ApplicationWindow):
     def _on_agent_received(self, obj: dict) -> None:
         nick = obj.get("nick", obj.get("from", "?"))
         self._append_system(f"agent message from {nick} (see: omarchy-relay agent inbox)")
-        _notify(f"Agent message from {nick}", obj.get("text", ""))
-        _ding()
+        self._alert(obj, f"Agent message from {nick}", obj.get("text", ""))
 
     def _handle_typing(self, obj: dict) -> None:
         device_id = obj.get("from")
@@ -1802,15 +1844,14 @@ class RelayWindow(Adw.ApplicationWindow):
         }
         if kind == "voice":
             GLib.idle_add(lambda: self._append_voice(meta, path, **message) or False)
-            _notify("Voice message", f"from {meta['nick']}")
+            self._alert(meta, "Voice message", f"from {meta['nick']}")
         elif kind == "image":
             GLib.idle_add(lambda: self._append_image(meta["nick"], path, **message) or False)
-            _notify("File received", f"{meta['filename']} from {meta['nick']}")
+            self._alert(meta, "File received", f"{meta['filename']} from {meta['nick']}")
         else:
             GLib.idle_add(lambda: self._append_file_received(meta, path, **message) or False)
-            _notify("File received", f"{meta['filename']} from {meta['nick']}")
+            self._alert(meta, "File received", f"{meta['filename']} from {meta['nick']}")
         self._remember_file(kind, meta["transfer_id"], meta, path)
-        _ding()
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
         GLib.idle_add(self._append_system, f"Couldn't receive {meta.get('filename', 'a file')}: {msg}")
@@ -2653,10 +2694,10 @@ class RelayWindow(Adw.ApplicationWindow):
         self._remember(
             obj, is_dm=is_dm, peer_device_id=peer_device_id, kind=treat.kind, extra={"to_nick": to_nick, "note": note}
         )
-        self._play_treat(treat)
+        if not self.client.is_backlog(obj):
+            self._play_treat(treat)
         if not is_mine:
-            _notify(obj["nick"], f"{treat.phrase(to_one=is_dm)} {treat.emoji}")
-            _ding()
+            self._alert(obj, obj["nick"], f"{treat.phrase(to_one=is_dm)} {treat.emoji}")
 
     def _append_treat(
         self,

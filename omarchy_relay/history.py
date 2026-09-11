@@ -113,6 +113,11 @@ class HistoryStore:
             for r in rows
         ]
 
+    def has_message(self, network: str, msg_id: str) -> bool:
+        """Whether msg_id is stored, in any state (deleted and hidden too)."""
+        row = self._conn.execute("SELECT 1 FROM messages WHERE network = ? AND id = ?", (network, msg_id)).fetchone()
+        return row is not None
+
     def edit_message(self, network: str, msg_id: str, from_device: str, text: str) -> None:
         """Replaces a text message's text and marks it edited. Only a row
         sent by from_device changes."""

@@ -9,12 +9,15 @@ import json
 import ssl
 import threading
 import time
+import uuid
 from typing import Callable, Optional
 
 import paho.mqtt.client as mqtt
 
 from .config import Config
 from .crypto import Cipher, InvalidToken, topic_namespace
+
+_BACKLOG_GRACE_SECONDS = 30
 
 
 class PendingActions:
@@ -65,18 +68,29 @@ class PendingActions:
 
 
 class RelayClient:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, persistent: bool = True):
+        """persistent: this device's long-running connection (gui, chat, tui,
+        daemon). It connects as the device id with a session the broker keeps
+        while it's offline, so QoS 1 messages sent meanwhile (chat, DMs,
+        files, actions, agent messages) arrive when it reconnects, and it
+        shows this device as online. A one-off command (send, msg, peers,
+        action, agent send) passes persistent=False: a throwaway client id and
+        session, and no presence, so it neither knocks the running app off
+        the broker nor takes the messages queued for it."""
         self.cfg = cfg
+        self.persistent = persistent
         self.ns = topic_namespace(cfg.network_name)
         self.cipher = Cipher(cfg.passphrase, cfg.network_name)
         self.presence_topic = f"{self.ns}/presence/{cfg.device_id}"
 
-        self._client = mqtt.Client(client_id=cfg.device_id, protocol=mqtt.MQTTv311, clean_session=True)
+        client_id = cfg.device_id if persistent else f"{cfg.device_id}-{uuid.uuid4().hex[:8]}"
+        self._client = mqtt.Client(client_id=client_id, protocol=mqtt.MQTTv311, clean_session=not persistent)
         if cfg.broker_username:
             self._client.username_pw_set(cfg.broker_username, cfg.broker_password or None)
         if cfg.broker_tls:
             self._client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
-        self._client.will_set(self.presence_topic, payload=b"", qos=1, retain=True)
+        if persistent:
+            self._client.will_set(self.presence_topic, payload=b"", qos=1, retain=True)
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
@@ -96,6 +110,8 @@ class RelayClient:
         self.pending_actions = PendingActions()
 
         self.connected = threading.Event()
+        # When the latest connect happened: see is_backlog().
+        self.connected_at = 0.0
 
     def connect(self, timeout: float = 10.0) -> None:
         self._client.connect(self.cfg.broker_host, self.cfg.broker_port, keepalive=30)
@@ -107,10 +123,11 @@ class RelayClient:
             )
 
     def disconnect(self) -> None:
-        try:
-            self._client.publish(self.presence_topic, payload=b"", qos=1, retain=True).wait_for_publish(3)
-        except Exception:
-            pass
+        if self.persistent:
+            try:
+                self._client.publish(self.presence_topic, payload=b"", qos=1, retain=True).wait_for_publish(3)
+            except Exception:
+                pass
         self._client.loop_stop()
         self._client.disconnect()
 
@@ -142,6 +159,13 @@ class RelayClient:
     def send_agent_message(self, target_device_id: str, obj: dict) -> None:
         self._publish_encrypted(f"{self.ns}/agent/{target_device_id}", obj)
 
+    def is_backlog(self, obj: dict) -> bool:
+        """Whether a message was sent well before we last connected: one the
+        broker held while we were offline, rather than one arriving live.
+        The grace period allows for the sender's clock being a little off."""
+        ts = obj.get("ts")
+        return self.connected_at > 0 and isinstance(ts, (int, float)) and ts < self.connected_at - _BACKLOG_GRACE_SECONDS
+
     def _publish_encrypted(self, topic: str, obj: dict, qos: int = 1, retain: bool = False) -> None:
         token = self.cipher.encrypt(json.dumps(obj).encode("utf-8"))
         self._client.publish(topic, payload=token, qos=qos, retain=retain)
@@ -164,7 +188,11 @@ class RelayClient:
                 (f"{self.ns}/agent/{self.cfg.device_id}", 1),
             ]
         )
-        self._publish_presence()
+        # Set here, on paho's thread, ahead of the queued messages the broker
+        # sends straight after connecting.
+        self.connected_at = time.time()
+        if self.persistent:
+            self._publish_presence()
         self.connected.set()
 
     def _on_disconnect(self, client, userdata, rc):

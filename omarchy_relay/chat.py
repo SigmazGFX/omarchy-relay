@@ -74,13 +74,14 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
         print_line(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {_reply_prefix(obj)}{obj['text']}")
         # Broadcasts echo back to the sender too (we're subscribed to our own
         # publish topic) — don't pop a notification/sound for our own messages.
-        if obj.get("from") != cfg.device_id and not _is_quiet(obj):
+        # Nor for what the broker held while we were offline.
+        if obj.get("from") != cfg.device_id and not _is_quiet(obj) and not client.is_backlog(obj):
             _notify(obj["nick"], obj["text"])
             _ding()
 
     def on_dm(obj):
         print_line(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {_reply_prefix(obj)}{obj['text']}")
-        if not _is_quiet(obj):
+        if not _is_quiet(obj) and not client.is_backlog(obj):
             _notify(f"DM from {obj['nick']}", obj["text"])
             _ding()
 

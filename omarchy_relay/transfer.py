@@ -84,6 +84,7 @@ class FileReceiver:
         self.downloads_dir = Path(cfg.downloads_dir).expanduser()
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
         self._transfers: dict[str, dict] = {}
+        self._finished: set[str] = set()  # transfer ids already saved or discarded
         self.on_complete = on_complete
         self.on_error = on_error
         self.on_progress = on_progress
@@ -96,6 +97,8 @@ class FileReceiver:
             return
 
         transfer_id = obj["transfer_id"]
+        if transfer_id in self._transfers or transfer_id in self._finished:
+            return  # the same meta delivered again (QoS 1): starting over would lose the chunks so far
         size = obj["size"]
         if size > self.cfg.max_file_size:
             if self.on_error:
@@ -140,6 +143,7 @@ class FileReceiver:
         part_path = state["part_path"]
         actual_hash = hashlib.sha256(part_path.read_bytes()).hexdigest()
         del self._transfers[transfer_id]
+        self._finished.add(transfer_id)
         if actual_hash != meta["sha256"]:
             part_path.unlink(missing_ok=True)
             if self.on_error:

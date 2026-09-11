@@ -130,7 +130,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     cfg = _load_config()
-    client = RelayClient(cfg)
+    client = RelayClient(cfg, persistent=False)
     peers = PeerDirectory()
     # Register before connect(): retained presence can arrive as soon as the
     # subscribe completes inside connect(), which races a callback set after.
@@ -155,7 +155,7 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_msg(args: argparse.Namespace) -> int:
     cfg = _load_config()
-    client = RelayClient(cfg)
+    client = RelayClient(cfg, persistent=False)
     peers = PeerDirectory()
     client.on_presence = lambda device_id, data: peers.update(device_id, data)
     client.connect()
@@ -180,7 +180,7 @@ def cmd_msg(args: argparse.Namespace) -> int:
 
 def cmd_action(args: argparse.Namespace) -> int:
     cfg = _load_config()
-    client = RelayClient(cfg)
+    client = RelayClient(cfg, persistent=False)
     peers = PeerDirectory()
     client.on_presence = lambda device_id, data: peers.update(device_id, data)
     client.connect()
@@ -209,13 +209,15 @@ def cmd_action(args: argparse.Namespace) -> int:
 
 def cmd_agent_send(args: argparse.Namespace) -> int:
     cfg = _load_config()
-    client = RelayClient(cfg)
+    client = RelayClient(cfg, persistent=False)
     peers = PeerDirectory()
     client.on_presence = lambda device_id, data: peers.update(device_id, data)
     client.connect()
     try:
         time.sleep(1.5)
         target = peers.resolve(args.peer)
+        if not target and args.peer in cfg.agents_peers:
+            target = args.peer  # a trusted device that's offline: the broker holds it until they connect
         if not target:
             print(f"error: no such peer online: {args.peer}", file=sys.stderr)
             return 1
@@ -356,7 +358,7 @@ def cmd_commands_remove(args: argparse.Namespace) -> int:
 
 def cmd_peers(args: argparse.Namespace) -> int:
     cfg = _load_config()
-    client = RelayClient(cfg)
+    client = RelayClient(cfg, persistent=False)
     peers = PeerDirectory()
     client.on_presence = lambda device_id, data: peers.update(device_id, data)
     client.connect()

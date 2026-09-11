@@ -91,12 +91,12 @@ class RelayApp(App):
         self._log(f"{_fmt_ts(obj['ts'])} <{obj['nick']}> {_reply_prefix(obj)}{obj['text']}")
         # Broadcasts echo back to the sender too (we're subscribed to our own
         # publish topic) — don't pop a notification for our own messages.
-        if obj.get("from") != self.cfg.device_id and not _is_quiet(obj):
+        if obj.get("from") != self.cfg.device_id and not _is_quiet(obj) and not self.client.is_backlog(obj):
             _notify(obj["nick"], obj["text"])
 
     def _handle_dm(self, obj: dict) -> None:
         self._log(f"{_fmt_ts(obj['ts'])} [DM from {obj['nick']}] {_reply_prefix(obj)}{obj['text']}")
-        if not _is_quiet(obj):
+        if not _is_quiet(obj) and not self.client.is_backlog(obj):
             _notify(f"DM from {obj['nick']}", obj["text"])
 
     def _handle_presence(self, device_id: str, data) -> None:

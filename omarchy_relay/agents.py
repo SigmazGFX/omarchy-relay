@@ -20,11 +20,11 @@ fields on a message. Trusting a device_id here means trusting whoever
 currently holds that passphrase, not a cryptographically verified
 identity.
 
-Delivery is best-effort and live-only, like DMs and remote actions: a
-message sent while the target has nothing running (no daemon/chat/gui
-connected) is simply not received — there's no store-and-forward on the
-broker side (clean_session=True). The mailbox only records what this
-device has actually seen or sent.
+Delivery is best-effort, like DMs: a message sent while the target has
+nothing running (no daemon/chat/gui connected) waits in that device's
+session on the broker and arrives when it next connects, for as long as
+the broker keeps it (see RelayClient's persistent sessions). The mailbox
+only records what this device has actually seen or sent.
 """
 from __future__ import annotations
 

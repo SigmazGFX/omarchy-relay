@@ -56,11 +56,13 @@ in, not by being woken up. Don't build a tight polling loop around this —
 check in at natural points (session start, before/after a handoff, when
 asked) as the "check-ins as needed" framing above intends.
 
-Delivery is **live-only, best-effort** — like DMs, there's no store-and-forward.
-A message only arrives if the target peer currently has `daemon`, `chat`, or
-`gui` running and connected. If you need to reach someone and `agent send`
-seems to hang or the reply never comes, check `omarchy-relay peers` first —
-they may simply not be online.
+Delivery is **best-effort**. A message to a peer with nothing running
+(`daemon`, `chat`, or `gui`) waits on the broker and arrives when they next
+connect, for as long as the broker keeps it, so a reply can take a while.
+`agent send` finds a peer by nickname only while they're online; to reach one
+who's offline, give their device id, which works for peers this machine
+trusts (`omarchy-relay agent trust list`). `omarchy-relay peers` shows who's
+online right now.
 
 ## A typical check-in
 

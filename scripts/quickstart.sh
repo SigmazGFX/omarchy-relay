@@ -51,6 +51,8 @@ allow_anonymous false
 password_file /etc/mosquitto/passwd
 persistence true
 persistence_location /var/lib/mosquitto/
+persistent_client_expiration 30d
+max_queued_messages 10000
 CONF
 sudo mosquitto_passwd -b -c /etc/mosquitto/passwd "$MQ_USER" "$MQ_PASS"
 sudo systemctl enable --now mosquitto

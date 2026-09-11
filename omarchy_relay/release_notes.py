@@ -19,6 +19,22 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.12.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Messages wait while you're offline",
+                "Chat, direct messages, and files sent while Relay isn't running now arrive when it starts "
+                "again, with one notification summing them up.",
+            ),
+            (
+                "One-off commands don't interrupt",
+                "omarchy-relay msg, send, peers, action, and agent send no longer knock the open app off "
+                "the broker.",
+            ),
+        ),
+    ),
+    Release(
         version="0.11.0",
         date="2026-09-11",
         items=(

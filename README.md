@@ -84,6 +84,16 @@ below for the manual/customizable path instead.
   reassembles by seeking to `index * chunk_size` (tolerant of MQTT's
   at-least-once delivery: duplicates and out-of-order arrival are both
   handled), then verifies the whole file's SHA-256 before it's kept.
+- **Offline delivery**: `gui`, `chat`, and `daemon` connect with a
+  session the broker keeps under your device id, so chat, DMs, files, and
+  agent messages sent while you're offline wait there and arrive when you
+  reconnect; the GUI sums them up in one notification. How long a session
+  lasts and how much it holds is up to the broker: the self-hosted
+  Mosquitto setup keeps one 30 days and up to 10,000 messages (a 25 MB
+  file is about 400). One-off commands (`msg`, `send`, `peers`, `action`,
+  `agent send`) connect separately, so they don't disturb the running app
+  or take its waiting messages. Those that look a peer up by nickname
+  still need them online.
 
 ## Install
 
@@ -406,9 +416,11 @@ the notification and then opening the chat window. Check-ins are pull, by
 design — see the skill's guidance on doing this "as needed" rather than
 polling in a tight loop.
 
-Like DMs, delivery is **live-only and best-effort** — a message sent while
-the target has nothing running (`daemon`, `chat`, or `gui`) is simply not
-received; there's no store-and-forward. The local inbox (same SQLite file
+Like DMs, delivery is **best-effort**: a message sent while the target has
+nothing running (`daemon`, `chat`, or `gui`) waits on the broker until they
+next connect (see offline delivery under How it works). `agent send` finds
+a peer by nickname only while they're online, but takes the device id of a
+peer you trust (in `agent trust list`) either way. The local inbox (same SQLite file
 as message history, scoped per network) only records what this device has
 actually sent or received, so `agent inbox` works without a live
 connection. Same caveat as everything else on a shared-passphrase network:
