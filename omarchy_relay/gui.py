@@ -29,7 +29,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from . import history, network_share
+from . import audio, history, network_share
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
@@ -37,6 +37,7 @@ from .presence import PeerDirectory
 from .transfer import FileReceiver, send_file
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_AUDIO_EXTENSIONS = {".ogg", ".opus", ".oga"}
 _CLIPBOARD_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/tiff", "image/webp")
 
 # Consecutive messages from the same sender within this many seconds render
@@ -96,6 +97,11 @@ _BASE_CSS = """
 
 .sparkle-particle {
   font-size: 1.6em;
+}
+
+button.recording {
+  background-color: #e01b24;
+  color: white;
 }
 
 .reactions-row {
@@ -348,6 +354,9 @@ class RelayWindow(Adw.ApplicationWindow):
         self._reaction_slots: dict[str, Gtk.Box] = {}  # msg_id -> its reaction-pills row
         self._reactions: dict[str, dict[str, dict[str, str]]] = {}  # msg_id -> emoji -> device_id -> nick
         self._sparkle_active = False
+        self._recorder: Optional[audio.Recorder] = None
+        self._recording_path: Optional[Path] = None
+        self._voice_players: list[dict] = []  # each: {"player": audio.Player | None, "reset": callable}
 
         self._install_theme()
 
@@ -491,8 +500,17 @@ class RelayWindow(Adw.ApplicationWindow):
         )
         self.send_btn.connect("clicked", self._on_send)
 
+        self.mic_btn = Gtk.Button(
+            icon_name="audio-input-microphone-symbolic",
+            tooltip_text="Record a voice message",
+            valign=Gtk.Align.CENTER,
+            css_classes=["circular", "flat"],
+        )
+        self.mic_btn.connect("clicked", self._on_mic_clicked)
+
         composer = Gtk.Box(spacing=8, css_classes=["composer"])
         composer.append(field)
+        composer.append(self.mic_btn)
         composer.append(self.send_btn)
         return Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=composer)
 
@@ -739,6 +757,56 @@ class RelayWindow(Adw.ApplicationWindow):
     def _open_containing_folder(self, path: Path) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
 
+    def _append_voice(self, meta: dict, path: Path) -> None:
+        now = time.time()
+        play_btn = Gtk.Button(
+            icon_name="media-playback-start-symbolic",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular"],
+        )
+        icon = Gtk.Image(icon_name="audio-x-generic-symbolic", pixel_size=20, css_classes=["file-icon"])
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        info.append(Gtk.Label(label="Voice message", xalign=0, css_classes=["heading"]))
+        info.append(
+            Gtk.Label(label=audio.format_duration(meta.get("duration")), xalign=0, css_classes=["caption", "stamp"])
+        )
+        bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
+        bubble.append(icon)
+        bubble.append(info)
+        bubble.append(play_btn)
+
+        state = {"player": None, "reset": lambda: play_btn.set_icon_name("media-playback-start-symbolic")}
+        self._voice_players.append(state)
+
+        def on_finished() -> bool:
+            state["reset"]()
+            return False
+
+        def on_click(_btn) -> None:
+            player = state["player"]
+            if player is not None and player.playing:
+                player.stop()
+                state["reset"]()
+                return
+            self._stop_other_voice_players(state)
+            if player is None:
+                player = audio.Player(path, on_finished=lambda: GLib.idle_add(on_finished))
+                state["player"] = player
+            player.play()
+            play_btn.set_icon_name("media-playback-stop-symbolic")
+
+        play_btn.connect("clicked", on_click)
+        self._append_bubble(bubble, nick=meta["nick"], ts=now, is_mine=meta.get("nick") == self.cfg.nickname)
+
+    def _stop_other_voice_players(self, exclude: dict) -> None:
+        for state in self._voice_players:
+            if state is exclude:
+                continue
+            player = state.get("player")
+            if player is not None and player.playing:
+                player.stop()
+                state["reset"]()
+
     def _append_image(self, nick: str, path: Path) -> None:
         is_mine = nick == self.cfg.nickname
         try:
@@ -874,11 +942,15 @@ class RelayWindow(Adw.ApplicationWindow):
         self._refresh_peer_list()
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
-        if path.suffix.lower() in _IMAGE_EXTENSIONS:
+        if meta.get("kind") == "voice" or path.suffix.lower() in _AUDIO_EXTENSIONS:
+            GLib.idle_add(self._append_voice, meta, path)
+            _notify("Voice message", f"from {meta['nick']}")
+        elif path.suffix.lower() in _IMAGE_EXTENSIONS:
             GLib.idle_add(self._append_image, meta["nick"], path)
+            _notify("File received", f"{meta['filename']} from {meta['nick']}")
         else:
             GLib.idle_add(self._append_file_received, meta, path)
-        _notify("File received", f"{meta['filename']} from {meta['nick']}")
+            _notify("File received", f"{meta['filename']} from {meta['nick']}")
         _ding()
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
@@ -1017,6 +1089,65 @@ class RelayWindow(Adw.ApplicationWindow):
         self.entry.get_buffer().insert_text(pos, emoji, -1)
         self.entry.set_position(pos + len(emoji))
         self.entry.grab_focus()
+
+    def _on_mic_clicked(self, _widget) -> None:
+        if self._recorder is None:
+            self._start_recording()
+        else:
+            self._stop_recording()
+
+    def _start_recording(self) -> None:
+        tmp_path = Path(tempfile.mkstemp(prefix="omarchy-relay-voice-", suffix=".ogg")[1])
+        try:
+            recorder = audio.Recorder(tmp_path)
+            recorder.start()
+        except audio.RecordingError as exc:
+            self.toast_overlay.add_toast(Adw.Toast(title=str(exc)))
+            tmp_path.unlink(missing_ok=True)
+            return
+        self._recorder = recorder
+        self._recording_path = tmp_path
+        self.mic_btn.set_icon_name("media-playback-stop-symbolic")
+        self.mic_btn.add_css_class("recording")
+        self.mic_btn.set_tooltip_text("Stop recording and send")
+
+    def _stop_recording(self) -> None:
+        recorder, path = self._recorder, self._recording_path
+        self._recorder = None
+        self.mic_btn.set_icon_name("audio-input-microphone-symbolic")
+        self.mic_btn.remove_css_class("recording")
+        self.mic_btn.set_tooltip_text("Record a voice message")
+
+        def work() -> None:
+            # EOS finalization can take a moment — off the GTK thread so
+            # the window doesn't freeze while the Ogg container flushes.
+            duration = recorder.stop()
+            GLib.idle_add(self._send_voice_message, path, duration)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _send_voice_message(self, tmp_path: Path, duration: float) -> bool:
+        if duration < 0.3 or tmp_path.stat().st_size == 0:
+            self._append_system("Recording too short, not sent")
+            tmp_path.unlink(missing_ok=True)
+            return False
+        # Move it into downloads_dir (not deleted after send) so the sender
+        # has a real, stable path too — file transfers don't echo back to
+        # their own sender the way broadcast chat messages do, so without
+        # this the sender would never see or be able to replay their own
+        # voice message.
+        downloads_dir = Path(self.cfg.downloads_dir).expanduser()
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        final_path = downloads_dir / f"voice-{int(time.time())}-{uuid.uuid4().hex[:6]}.ogg"
+        tmp_path.rename(final_path)
+        duration = round(duration, 1)
+        try:
+            send_file(self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration})
+        except (FileNotFoundError, ValueError) as exc:
+            self._append_system(str(exc))
+            return False
+        self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path)
+        return False
 
     def _on_attach(self, _widget) -> None:
         dialog = Gtk.FileDialog()

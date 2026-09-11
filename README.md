@@ -91,14 +91,17 @@ cd ~/Projects/omarchy-relay
 ```
 
 This installs `python-paho-mqtt`, `python-cryptography`, `python-textual`,
-`python-gobject`, `gtk4`, and `libadwaita` via `pacman`, copies the package
-to `~/.local/share/omarchy-relay`, puts a launcher at
+`python-gobject`, `gtk4`, `libadwaita`, `gstreamer`, `gst-plugins-base`,
+and `gst-plugin-pipewire` via `pacman`, copies the package to
+`~/.local/share/omarchy-relay`, puts a launcher at
 `~/.local/bin/omarchy-relay`, and adds "Omarchy Relay" to your app
 launcher.
 
 On another distro: create a venv, `pip install paho-mqtt cryptography
-textual PyGObject`, install GTK4 + libadwaita through your package
-manager, and run `python3 -m omarchy_relay.cli` from inside the repo.
+textual PyGObject`, install GTK4 + libadwaita + GStreamer (core,
+`gst-plugins-base`, and a PipeWire or ALSA source/sink plugin) through your
+package manager, and run `python3 -m omarchy_relay.cli` from inside the
+repo.
 
 ## Set up a broker
 
@@ -183,6 +186,28 @@ DMs, and received files (if `notify-send` is installed), plus a quiet
 "ding" via `canberra-gtk-play` using your system's own sound theme (if
 `libcanberra` is installed — it usually already is). Neither fires for
 your own messages echoing back to you.
+
+**Voice messages**: the microphone button next to Send records a voice
+note (Ogg Opus, via GStreamer/PipeWire) — click once to start, again to
+stop and send. Received (and your own sent) voice messages render as a
+play/pause bubble with duration; only one plays at a time. Sent voice
+files land in `transfer.downloads_dir` alongside received ones.
+
+**`/sparkels`**: any message containing this word sets off a five-second
+pixie-dust burst on every client that renders it, sender included.
+
+**Message history**: recent messages are kept locally (SQLite, under
+`~/.local/share/omarchy-relay/history.db`, scoped per network) and shown
+on startup before live traffic arrives. Settings → Chat has two
+independent caps — keep the last N messages, and/or keep messages for N
+days — either at 0 to not limit that dimension. Nothing here is
+transmitted; it's purely a local cache of what this device has already
+seen.
+
+**Export/Import**: Settings → "Share this network" writes the current
+Network + Broker fields (not your nickname/device) to a `.toml` file, or
+reads one back into the fields for review before Save — the easiest way to
+get someone else onto the same network.
 
 ### Run the daemon in the background
 
@@ -272,7 +297,8 @@ nothing here equivalent to a remote shell.
 
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
-                    presence, remote_actions, chat, cli, tui, gui)
+                    presence, remote_actions, chat, cli, tui, gui, audio,
+                    history, network_share)
 install.sh          installs deps (pacman) + the omarchy-relay launcher
 uninstall.sh
 scripts/            one-shot quickstart installers (see Quickstart above)

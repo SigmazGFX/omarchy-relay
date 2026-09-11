@@ -18,7 +18,7 @@ from typing import Callable, Optional
 _META_SETTLE_DELAY = 0.1
 
 
-def send_file(client, cfg, path: Path, to: str = "*") -> tuple[str, int]:
+def send_file(client, cfg, path: Path, to: str = "*", extra_meta: Optional[dict] = None) -> tuple[str, int]:
     path = Path(path).expanduser()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -37,21 +37,21 @@ def send_file(client, cfg, path: Path, to: str = "*") -> tuple[str, int]:
     total_chunks = (len(data) + chunk_size - 1) // chunk_size
     transfer_id = uuid.uuid4().hex[:12]
 
-    client.send_file_meta(
-        transfer_id,
-        {
-            "transfer_id": transfer_id,
-            "from": cfg.device_id,
-            "nick": cfg.nickname,
-            "to": to,
-            "filename": path.name,
-            "size": size,
-            "sha256": sha256,
-            "chunk_size": chunk_size,
-            "total_chunks": total_chunks,
-            "ts": time.time(),
-        },
-    )
+    meta = {
+        "transfer_id": transfer_id,
+        "from": cfg.device_id,
+        "nick": cfg.nickname,
+        "to": to,
+        "filename": path.name,
+        "size": size,
+        "sha256": sha256,
+        "chunk_size": chunk_size,
+        "total_chunks": total_chunks,
+        "ts": time.time(),
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+    client.send_file_meta(transfer_id, meta)
     # Give the broker a moment to fan the meta message out before the flood
     # of chunk messages arrives — receivers ignore chunks for an unseen
     # transfer_id, so this just reduces (harmless) dropped early chunks.
