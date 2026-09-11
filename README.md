@@ -213,6 +213,13 @@ show in a bubble at the bottom of the chat (with their name) and under
 their name in the sidebar, and the chat header says so ("Alice is
 typing…"). `chat` and `chat --tui` neither send nor show it.
 
+**ASCII drawings**: `/ascii <drawing>` sends a drawing in a monospaced box
+that keeps its spacing, and scrolls sideways if it's wider than the chat.
+The message box is a single line, so paste a multi-line drawing right
+after `/ascii `. Drawings work with replies and reactions and are kept in
+message history; `chat`, `chat --tui`, and older clients show them as
+plain text.
+
 **Replies**: the reply arrow under a message (next to the react button)
 quotes it above the message box; what you send next carries that quote at
 its top. Click a quote to jump to the original, and Esc or × cancels the

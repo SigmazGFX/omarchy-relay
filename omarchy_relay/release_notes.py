@@ -27,6 +27,11 @@ RELEASES: tuple[Release, ...] = (
                 "The reply arrow under a message quotes it in your next one. Click a quote to jump to the "
                 "original, and a reply to a direct message stays private.",
             ),
+            (
+                "ASCII drawings",
+                "/ascii followed by a drawing sends it in a monospaced box that keeps every space. Paste a "
+                "multi-line drawing right after /ascii.",
+            ),
         ),
     ),
     Release(

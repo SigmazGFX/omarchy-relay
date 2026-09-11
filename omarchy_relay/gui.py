@@ -196,6 +196,13 @@ button.recording {
   box-shadow: 0 0 0 3px var(--accent-color);
 }
 
+/* /ascii: a drawing keeps its spacing, in a box that scrolls sideways when
+   it's wider than the chat. */
+.ascii-art {
+  font-family: monospace;
+  font-size: 0.95em;
+}
+
 .nick-0 { color: oklab(from var(--relay-nick-0) var(--standalone-color-oklab)); }
 .nick-1 { color: oklab(from var(--relay-nick-1) var(--standalone-color-oklab)); }
 .nick-2 { color: oklab(from var(--relay-nick-2) var(--standalone-color-oklab)); }
@@ -583,8 +590,10 @@ _TREATS = {
 
 # The composer's inline syntax hints. If Enter is pressed while one is still
 # showing, its placeholders arrive as literal text and are dropped.
-_COMMAND_HINTS = ("/action <nickname> <command-name>",) + tuple(f"/{kind} <nickname> <note>" for kind in _TREATS)
-_HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note)>")
+_COMMAND_HINTS = ("/action <nickname> <command-name>", "/ascii <drawing>") + tuple(
+    f"/{kind} <nickname> <note>" for kind in _TREATS
+)
+_HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note|drawing)>")
 
 
 def _reply_ref(obj: dict) -> Optional[dict]:
@@ -599,6 +608,32 @@ def _reply_ref(obj: dict) -> Optional[dict]:
         "nick": str(ref.get("nick") or "?"),
         "text": str(ref.get("text") or "")[:_REPLY_PREVIEW_CHARS],
     }
+
+
+def _ascii_drawing(raw: str) -> str:
+    """What follows "/ascii", spacing intact: only the space after the
+    command, blank lines around the drawing, and trailing spaces go. An
+    unfilled "<drawing>" hint counts as no drawing."""
+    body = raw.replace("\r\n", "\n").lstrip()[len("/ascii") :]
+    if body[:1] == " ":
+        body = body[1:]
+    lines = [line.rstrip() for line in body.split("\n")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    drawing = "\n".join(lines)
+    return "" if drawing.strip() == "<drawing>" else drawing
+
+
+def _text_extra(reply: Optional[dict], ascii_art: bool) -> Optional[dict]:
+    """History's extra for a text message: only what sets it apart from plain text."""
+    extra = {}
+    if reply:
+        extra["reply_to"] = reply
+    if ascii_art:
+        extra["format"] = "ascii"
+    return extra or None
 
 
 def _is_emoji_only(text: str, max_len: int = 12) -> bool:
@@ -1116,21 +1151,34 @@ class RelayWindow(Adw.ApplicationWindow):
         dm_peer_device_id: Optional[str] = None,
         is_history: bool = False,
         reply_to: Optional[dict] = None,
+        ascii_art: bool = False,
     ) -> None:
-        body = Gtk.Label(
-            label=text,
-            xalign=0,
-            wrap=True,
-            wrap_mode=Pango.WrapMode.WORD_CHAR,
-            # Without this a WORD_CHAR label asks for its narrowest wrap as
-            # its natural width, leaving short lines inside a wide bubble.
-            natural_wrap_mode=Gtk.NaturalWrapMode.NONE,
-            hexpand=True,
-            selectable=True,
-            max_width_chars=52,
-        )
-        if _is_emoji_only(text):
-            body.add_css_class("emoji-only")
+        if ascii_art:
+            art = Gtk.Label(label=text, xalign=0, selectable=True, css_classes=["ascii-art"])
+            # A drawing never wraps, so one wider than the chat scrolls sideways
+            # rather than stretching the whole window.
+            body = Gtk.ScrolledWindow(
+                child=art,
+                hexpand=True,
+                vscrollbar_policy=Gtk.PolicyType.NEVER,
+                propagate_natural_width=True,
+                propagate_natural_height=True,
+            )
+        else:
+            body = Gtk.Label(
+                label=text,
+                xalign=0,
+                wrap=True,
+                wrap_mode=Pango.WrapMode.WORD_CHAR,
+                # Without this a WORD_CHAR label asks for its narrowest wrap as
+                # its natural width, leaving short lines inside a wide bubble.
+                natural_wrap_mode=Gtk.NaturalWrapMode.NONE,
+                hexpand=True,
+                selectable=True,
+                max_width_chars=52,
+            )
+            if _is_emoji_only(text):
+                body.add_css_class("emoji-only")
         stamp = self._stamp(ts)
         stamp.set_valign(Gtk.Align.END)
         line = Gtk.Box(spacing=10, css_classes=[] if reply_to else ["bubble"])
@@ -1345,9 +1393,11 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         self._clear_typing(obj.get("from", ""))
         is_mine = obj.get("from") == self.cfg.device_id
-        reply = _reply_ref(obj)
-        self._append_text(obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine, reply_to=reply)
-        self._remember(obj, is_dm=False, peer_device_id=None, extra={"reply_to": reply} if reply else None)
+        reply, ascii_art = _reply_ref(obj), obj.get("format") == "ascii"
+        self._append_text(
+            obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine, reply_to=reply, ascii_art=ascii_art
+        )
+        self._remember(obj, is_dm=False, peer_device_id=None, extra=_text_extra(reply, ascii_art))
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
@@ -1361,7 +1411,7 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") in _TREATS:
             self._handle_treat(_TREATS[obj["type"]], obj, is_dm=True)
             return
-        reply = _reply_ref(obj)
+        reply, ascii_art = _reply_ref(obj), obj.get("format") == "ascii"
         self._append_text(
             obj["nick"],
             obj["ts"],
@@ -1370,8 +1420,9 @@ class RelayWindow(Adw.ApplicationWindow):
             is_dm=True,
             dm_peer_device_id=obj.get("from"),
             reply_to=reply,
+            ascii_art=ascii_art,
         )
-        self._remember(obj, is_dm=True, peer_device_id=obj.get("from"), extra={"reply_to": reply} if reply else None)
+        self._remember(obj, is_dm=True, peer_device_id=obj.get("from"), extra=_text_extra(reply, ascii_art))
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
 
@@ -1457,6 +1508,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 dm_peer_device_id=m["peer_device_id"],
                 is_history=True,
                 reply_to=_reply_ref(m["extra"]),
+                ascii_art=m["extra"].get("format") == "ascii",
             )
         count = len(messages)
         self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
@@ -1613,10 +1665,19 @@ class RelayWindow(Adw.ApplicationWindow):
             )
 
     def _on_send(self, _widget) -> None:
-        text = self.entry.get_text().strip()
+        raw = self.entry.get_text()
+        text = raw.strip()
         if not text:
             return
         self.entry.set_text("")
+        if text.split(maxsplit=1)[0] == "/ascii":
+            # Ahead of the hint cleanup below, which would eat into the drawing's spacing.
+            drawing = _ascii_drawing(raw)
+            if drawing:
+                self._send_text(drawing, ascii_art=True)
+            else:
+                self._append_system("Usage: /ascii <drawing> — paste a multi-line drawing after /ascii")
+            return
         if text.startswith("/"):
             text = _HINT_PLACEHOLDER.sub("", text).strip()
         parts = text.split(maxsplit=2)
@@ -1626,6 +1687,9 @@ class RelayWindow(Adw.ApplicationWindow):
         if parts and parts[0].startswith("/") and parts[0][1:] in _TREATS:
             self._handle_treat_command(_TREATS[parts[0][1:]], text)
             return
+        self._send_text(text)
+
+    def _send_text(self, text: str, *, ascii_art: bool = False) -> None:
         payload = {
             "id": uuid.uuid4().hex,
             "ts": time.time(),
@@ -1633,6 +1697,8 @@ class RelayWindow(Adw.ApplicationWindow):
             "nick": self.cfg.nickname,
             "text": text,
         }
+        if ascii_art:
+            payload["format"] = "ascii"
         reply = self._reply_to
         self._cancel_reply()
         if reply is None:
@@ -1655,8 +1721,9 @@ class RelayWindow(Adw.ApplicationWindow):
             is_dm=True,
             dm_peer_device_id=peer,
             reply_to=payload["reply_to"],
+            ascii_art=ascii_art,
         )
-        self._remember(payload, is_dm=True, peer_device_id=peer, extra={"reply_to": payload["reply_to"]})
+        self._remember(payload, is_dm=True, peer_device_id=peer, extra=_text_extra(payload["reply_to"], ascii_art))
 
     def _handle_action_command(self, parts: list[str]) -> None:
         if len(parts) != 3:
