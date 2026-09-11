@@ -20,7 +20,8 @@ echo "==> Installing dependencies (requires sudo): ${DEPS[*]}"
 sudo pacman -S --needed "${DEPS[@]}"
 
 echo "==> Installing package to $INSTALL_DIR"
-rm -rf "$INSTALL_DIR"
+# Copied over the existing install, never wiped first: this directory is
+# also DATA_DIR, where message history (history.db) lives.
 mkdir -p "$INSTALL_DIR"
 cp -r "$REPO_DIR/omarchy_relay" "$INSTALL_DIR/"
 
