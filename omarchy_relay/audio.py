@@ -25,7 +25,13 @@ Gst.init(None)
 # constant so a test can swap in a synthetic source without duplicating the
 # rest of the pipeline.
 RECORD_SOURCE = "pipewiresrc"
-_RECORD_REST = "audioconvert ! audioresample ! opusenc ! oggmux ! filesink name=sink"
+# The two `queue` elements put the live capture, the encoding, and the
+# file write on separate threads. Without them, a hiccup anywhere
+# downstream (encoder scheduling, disk I/O) stalls the capture thread
+# too, which is heard as jitter/dropouts in the recording.
+_RECORD_REST = (
+    "queue ! audioconvert ! audioresample ! opusenc ! queue ! oggmux ! filesink name=sink"
+)
 
 
 class RecordingError(RuntimeError):
