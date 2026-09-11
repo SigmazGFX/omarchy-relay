@@ -3383,6 +3383,20 @@ class RelayWindow(Adw.ApplicationWindow):
         remote_group.add(remote_row)
         page.add(remote_group)
 
+        agent_group = Adw.PreferencesGroup(
+            title="Agent Messaging",
+            description="Let a trusted peer's Claude Code session exchange free-form messages with yours.",
+        )
+        agent_row = Adw.ActionRow(
+            title="Manage agent-messaging peers",
+            subtitle="Currently " + ("enabled" if self.cfg.agents_enabled else "disabled"),
+            activatable=True,
+        )
+        agent_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+        agent_row.connect("activated", lambda _r: self._on_open_agent_messaging())
+        agent_group.add(agent_row)
+        page.add(agent_group)
+
         toasts = Adw.ToastOverlay(child=page)
         toolbar_view = Adw.ToolbarView(content=toasts)
         toolbar_view.add_top_bar(header)
@@ -3672,6 +3686,108 @@ class RelayWindow(Adw.ApplicationWindow):
         add_command_row.set_activatable_widget(add_command_btn)
         add_command_group.add(add_command_row)
         page.add(add_command_group)
+
+        toolbar_view = Adw.ToolbarView(content=toasts)
+        toolbar_view.add_top_bar(header)
+        dialog.set_child(toolbar_view)
+        dialog.present(self)
+
+    def _on_open_agent_messaging(self) -> None:
+        dialog = Adw.Dialog(title="Agent Messaging", content_width=480, content_height=560)
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+        close_btn = Gtk.Button(label="Close")
+        close_btn.connect("clicked", lambda _b: dialog.close())
+        header.pack_start(close_btn)
+
+        page = Adw.PreferencesPage()
+        toasts = Adw.ToastOverlay(child=page)
+
+        intro_group = Adw.PreferencesGroup(
+            description=(
+                "A separate, free-form channel from Remote Commands — meant for one Claude Code "
+                "session to message another's, not to trigger anything here. Off by default. "
+                "Trusting a peer here is independent of trusting it for Remote Commands."
+            )
+        )
+        enabled_row = Adw.SwitchRow(title="Allow trusted peers' agents to message this machine's agent")
+        enabled_row.set_active(self.cfg.agents_enabled)
+
+        def on_enabled_toggled(row: Adw.SwitchRow, _pspec) -> None:
+            self.cfg.agents_enabled = row.get_active()
+            self.cfg.save()
+
+        enabled_row.connect("notify::active", on_enabled_toggled)
+        intro_group.add(enabled_row)
+        page.add(intro_group)
+
+        # -- Trusted peers ----------------------------------------------------
+        trust_group = Adw.PreferencesGroup(
+            title="Trusted Peers",
+            description="Only these devices' agent messages are accepted; everyone else is silently dropped.",
+        )
+        page.add(trust_group)
+        trust_rows: list[Adw.ActionRow] = []
+
+        def render_trust_rows() -> None:
+            for row in trust_rows:
+                trust_group.remove(row)
+            trust_rows.clear()
+            online = self.peers.snapshot()
+            for device_id, level in sorted(self.cfg.agents_peers.items()):
+                nick = online.get(device_id, {}).get("nick")
+                row = Adw.ActionRow(
+                    title=nick if nick else device_id,
+                    subtitle=device_id if nick else f"trust: {level}",
+                )
+                remove_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+
+                def on_remove(_b, dev: str = device_id) -> None:
+                    self.cfg.agents_peers.pop(dev, None)
+                    self.cfg.save()
+                    render_trust_rows()
+
+                remove_btn.connect("clicked", on_remove)
+                row.add_suffix(remove_btn)
+                trust_group.add(row)
+                trust_rows.append(row)
+
+        render_trust_rows()
+
+        add_trust_group = Adw.PreferencesGroup()
+        online_now = {d: v for d, v in self.peers.snapshot().items() if d != self.cfg.device_id}
+        online_ids = sorted(online_now.keys())
+        peer_choices = ["Pick an online peer…"] + [f"{online_now[d].get('nick', '?')} ({d})" for d in online_ids]
+        peer_combo = Adw.ComboRow(title="Online peers")
+        peer_combo.set_model(Gtk.StringList.new(peer_choices))
+        device_entry = Adw.EntryRow(title="Device ID")
+
+        def on_peer_picked(combo: Adw.ComboRow, _pspec) -> None:
+            idx = combo.get_selected()
+            if 1 <= idx <= len(online_ids):
+                device_entry.set_text(online_ids[idx - 1])
+
+        peer_combo.connect("notify::selected", on_peer_picked)
+        add_trust_group.add(peer_combo)
+        add_trust_group.add(device_entry)
+        add_trust_row = Adw.ActionRow(title="Trust this device", activatable=True)
+        add_trust_btn = Gtk.Button(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat", "circular"])
+
+        def on_add_trust(_b) -> None:
+            dev = device_entry.get_text().strip()
+            if not dev:
+                toasts.add_toast(Adw.Toast(title="Enter or pick a device ID"))
+                return
+            self.cfg.agents_peers[dev] = "agent"
+            self.cfg.save()
+            device_entry.set_text("")
+            render_trust_rows()
+            toasts.add_toast(Adw.Toast(title=f"Trusted {dev}"))
+
+        add_trust_btn.connect("clicked", on_add_trust)
+        add_trust_row.add_suffix(add_trust_btn)
+        add_trust_row.set_activatable_widget(add_trust_btn)
+        add_trust_group.add(add_trust_row)
+        page.add(add_trust_group)
 
         toolbar_view = Adw.ToolbarView(content=toasts)
         toolbar_view.add_top_bar(header)
