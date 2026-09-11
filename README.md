@@ -279,7 +279,11 @@ omarchy-relay trust set <their-device-id> none      # revoke
 omarchy-relay action <their-nickname> status        # from the other machine: run it, print the result
 ```
 
-Inside `chat`: `/action <nick> <name>`.
+Inside `chat`: `/action <nick> <name>`. Inside `gui`'s message box: the
+same `/action <nickname> <command-name>`, sent instead of as a chat
+message — typing `/action` there shows the syntax as inline ghost/
+selected text to guide you, and the result (or a timeout/denial) prints
+as a line in the chat log, visible only to you.
 
 Output is captured and returned (stdout/stderr, capped at 8KB each, plus
 the exit code) — there's no arbitrary-command tier, by design, so there's

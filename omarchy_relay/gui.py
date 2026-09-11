@@ -35,7 +35,7 @@ from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
-from .remote_actions import RemoteActionHandler
+from .remote_actions import RemoteActionHandler, run_action
 from .transfer import FileReceiver, send_file
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -583,6 +583,20 @@ class RelayWindow(Adw.ApplicationWindow):
         self.entry = Gtk.Entry(hexpand=True, placeholder_text=self._composer_placeholder())
         self.entry.connect("activate", self._on_send)
         self.entry.connect("changed", self._on_entry_changed)
+
+        # Ghost/inline type-ahead: as soon as what's typed prefix-matches
+        # this one candidate string, GTK shows the rest of it inline as
+        # selected text — typing further characters that match extends the
+        # selection, anything else clears it. No popup (popup_completion
+        # off), just the inline suffix.
+        action_hint = Gtk.EntryCompletion()
+        hint_model = Gtk.ListStore(str)
+        hint_model.append(["/action <nickname> <command-name>"])
+        action_hint.set_model(hint_model)
+        action_hint.set_text_column(0)
+        action_hint.set_inline_completion(True)
+        action_hint.set_popup_completion(False)
+        self.entry.set_completion(action_hint)
         paste_controller = Gtk.EventControllerKey()
         paste_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         paste_controller.connect("key-pressed", self._on_entry_key_pressed)
@@ -1172,9 +1186,46 @@ class RelayWindow(Adw.ApplicationWindow):
         if not text:
             return
         self.entry.set_text("")
+        parts = text.split(maxsplit=2)
+        if parts and parts[0] == "/action":
+            self._handle_action_command(parts)
+            return
         self.client.send_chat(
             {"id": uuid.uuid4().hex, "ts": time.time(), "from": self.cfg.device_id, "nick": self.cfg.nickname, "text": text}
         )
+
+    def _handle_action_command(self, parts: list[str]) -> None:
+        if len(parts) != 3:
+            self._append_system("Usage: /action <nickname> <command-name>")
+            return
+        _, peer_ref, action_name = parts
+        target = self.peers.resolve(peer_ref)
+        if not target:
+            self._append_system(f"No such peer online: {peer_ref}")
+            return
+        self._append_system(f"Running '{action_name}' on {peer_ref}…")
+
+        def work() -> None:
+            try:
+                result = run_action(self.client, self.cfg, target, action_name)
+            except TimeoutError as exc:
+                GLib.idle_add(self._append_system, str(exc))
+                return
+            GLib.idle_add(self._show_action_result, peer_ref, action_name, result)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_action_result(self, peer_ref: str, action_name: str, result: dict) -> bool:
+        if result.get("ok"):
+            lines = [f"'{action_name}' on {peer_ref} (exit {result.get('exit_code', 0)}):"]
+            if result.get("stdout"):
+                lines.append(result["stdout"].rstrip("\n"))
+            if result.get("stderr"):
+                lines.append("stderr: " + result["stderr"].rstrip("\n"))
+            self._append_system("\n".join(lines))
+        else:
+            self._append_system(f"'{action_name}' on {peer_ref} failed: {result.get('error', 'unknown error')}")
+        return False
 
     def _build_react_button(self, msg_id: str) -> Gtk.MenuButton:
         picks = Gtk.Box(spacing=2, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
