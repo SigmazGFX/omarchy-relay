@@ -35,7 +35,13 @@ class Config:
     # below — never send text that gets run. See remote_actions.py.
     remote_actions_enabled: bool = False
     remote_actions_peers: dict = dataclasses.field(default_factory=dict)  # device_id -> "none"|"commands"
-    remote_actions_commands: dict = dataclasses.field(default_factory=dict)  # name -> fixed shell string
+    # "status" -> uptime ships pre-populated on new configs — inert on its
+    # own since it only runs for a peer you've explicitly trusted with the
+    # feature turned on, but saves typing it in once you do. Existing
+    # configs loaded from disk aren't touched (Config.load() below reads
+    # this straight from the file, not from this default), so removing it
+    # sticks.
+    remote_actions_commands: dict = dataclasses.field(default_factory=lambda: {"status": "uptime"})
     # Display preference: show "X is online"/"X went offline" lines in the
     # chat log. Peer list/sidebar accuracy is unaffected either way.
     show_presence: bool = True
