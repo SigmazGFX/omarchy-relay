@@ -171,7 +171,7 @@ peer sidebar with online status, a message log, a file-attach button,
 clipboard image paste (Ctrl+V into the message box with an image on the
 clipboard — a screenshot, a browser image copy — sends it immediately;
 received images render inline as a thumbnail instead of a generic file
-row, on both ends), and a Settings screen (gear icon) for editing
+row, on both ends — double-click one to see it full size), and a Settings screen (gear icon) for editing
 nickname/network
 name/passphrase/broker host/port/TLS/credentials without touching the
 config file by hand. Settings also has a "Show online/offline messages"

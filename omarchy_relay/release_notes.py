@@ -19,6 +19,13 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.6.0",
+        date="2026-09-11",
+        items=(
+            ("Expand images", "Double-click an image in the chat to see it full size. Escape closes it."),
+        ),
+    ),
+    Release(
         version="0.5.0",
         date="2026-09-11",
         items=(

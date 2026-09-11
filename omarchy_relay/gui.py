@@ -1096,8 +1096,13 @@ class RelayWindow(Adw.ApplicationWindow):
             self._append_file_received({"nick": nick, "filename": path.name}, path)
             return
         scale = min(1.0, _IMAGE_MAX_WIDTH / texture.get_width(), _IMAGE_MAX_HEIGHT / texture.get_height())
-        picture = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True)
+        picture = Gtk.Picture(
+            paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True, tooltip_text="Double-click to expand"
+        )
         picture.set_size_request(max(1, round(texture.get_width() * scale)), max(1, round(texture.get_height() * scale)))
+        expand = Gtk.GestureClick()
+        expand.connect("pressed", self._on_image_pressed, texture, "Your image" if is_mine else f"Image from {nick}")
+        picture.add_controller(expand)
         bubble = Gtk.Overlay(child=picture, overflow=Gtk.Overflow.HIDDEN, css_classes=["bubble", "media"])
         # Our own images are pasted from a temp file that's gone moments
         # later, so there's no folder worth opening for those.
@@ -1114,6 +1119,10 @@ class RelayWindow(Adw.ApplicationWindow):
             open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
             bubble.add_overlay(open_btn)
         self._append_bubble(bubble, nick=nick, ts=time.time(), is_mine=is_mine)
+
+    def _on_image_pressed(self, _gesture, n_press: int, _x: float, _y: float, texture: Gdk.Texture, title: str) -> None:
+        if n_press == 2:
+            ImageViewerWindow(self, texture, title).present()
 
     def _refresh_peer_list(self) -> None:
         self.peer_list.remove_all()
@@ -2552,6 +2561,51 @@ def _hyprland_dispatch(lua: list[str], legacy: list[str]) -> None:
             _hyprctl(["eval", "\n".join(lua)])
     elif legacy:
         _hyprctl(["--batch", " ; ".join(f"dispatch {command}" for command in legacy)])
+
+
+class ImageViewerWindow(Adw.Window):
+    """A chat image at full size, scaled down to fit the screen when it's
+    bigger. Escape closes it. It shows the texture the chat already decoded,
+    since a pasted or snipped image's file is deleted moments after sending."""
+
+    _HEADER_HEIGHT = 47  # Adw.HeaderBar, so the image gets the rest of the window
+
+    def __init__(self, parent: Gtk.Window, texture: Gdk.Texture, title: str):
+        width, height = texture.get_width(), texture.get_height()
+        super().__init__(transient_for=parent, modal=True, title=title)
+        header = Adw.HeaderBar(title_widget=Adw.WindowTitle(title=title, subtitle=f"{width} × {height}"))
+        picture = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.SCALE_DOWN, can_shrink=True)
+        view = Adw.ToolbarView(content=picture)
+        view.add_top_bar(header)
+        self.set_content(view)
+
+        # Opens at the image's own size, or within 90% of the monitor.
+        scale = 1.0
+        monitor = self._monitor_for(parent)
+        if monitor is not None:
+            geometry = monitor.get_geometry()
+            scale = min(1.0, geometry.width * 0.9 / width, (geometry.height * 0.9 - self._HEADER_HEIGHT) / height)
+        self.set_default_size(max(240, round(width * scale)), max(160, round(height * scale) + self._HEADER_HEIGHT))
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(keys)
+
+    @staticmethod
+    def _monitor_for(parent: Gtk.Window) -> Optional[Gdk.Monitor]:
+        display, surface = parent.get_display(), parent.get_surface()
+        if surface is not None:
+            monitor = display.get_monitor_at_surface(surface)
+            if monitor is not None:
+                return monitor
+        monitors = display.get_monitors()
+        return monitors.get_item(0) if monitors.get_n_items() else None
+
+    def _on_key_pressed(self, _controller, keyval, _keycode, _state) -> bool:
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        return False
 
 
 class RelayApp(Adw.Application):
