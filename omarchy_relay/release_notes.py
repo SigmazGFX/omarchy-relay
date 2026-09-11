@@ -27,6 +27,10 @@ RELEASES: tuple[Release, ...] = (
                 "Files, images, and voice messages have the react, reply, and ⋯ buttons, like any message. "
                 "Deleting one leaves the saved file where it is.",
             ),
+            (
+                "Reactions stay",
+                "Reactions come back when Relay restarts, along with the messages they're on.",
+            ),
         ),
     ),
     Release(

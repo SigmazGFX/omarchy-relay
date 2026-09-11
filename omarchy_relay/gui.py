@@ -721,8 +721,8 @@ class RelayWindow(Adw.ApplicationWindow):
         self._scroll_pending = False
         self._chat_extent = (0.0, 0.0)  # (upper, page_size) as of the last layout change
 
-        # Reactions, keyed by message id — session-only, like the rest of the
-        # chat log (nothing here is persisted to disk).
+        # Per-message state, keyed by message id. Reactions are kept in
+        # history as well, and _load_history puts them back.
         self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id", "nick", "preview", "from_device", "ts"}
         self._message_bubbles: dict[str, Gtk.Widget] = {}  # msg_id -> its bubble, for replies to jump to
         self._reaction_slots: dict[str, Gtk.Box] = {}  # msg_id -> its reaction-pills row
@@ -1606,6 +1606,11 @@ class RelayWindow(Adw.ApplicationWindow):
                 from_device=m["from_device"],
                 edited=bool(m["extra"].get("edited")),
             )
+        for target_id, emoji, device_id, nick in self.history.reactions(self.cfg.network_name):
+            if target_id in self._message_meta:
+                self._reactions.setdefault(target_id, {}).setdefault(emoji, {})[device_id] = nick
+        for target_id in self._reactions:
+            self._render_reactions(target_id)
         count = len(messages)
         self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
 
@@ -1647,6 +1652,9 @@ class RelayWindow(Adw.ApplicationWindow):
                 self._reactions[target_id].pop(emoji, None)
         else:
             by_emoji[device_id] = obj.get("nick", "?")
+        self.history.set_reaction(
+            self.cfg.network_name, target_id, emoji, device_id, obj.get("nick", "?"), present=obj.get("op") != "remove"
+        )
         self._render_reactions(target_id)
 
     def _handle_presence(self, device_id: str, data) -> None:

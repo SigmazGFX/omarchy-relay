@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS messages (
     extra TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_network_ts ON messages (network, ts);
+CREATE TABLE IF NOT EXISTS reactions (
+    network TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    nick TEXT NOT NULL,
+    PRIMARY KEY (network, target_id, emoji, device_id)
+);
 """
 
 
@@ -126,11 +134,13 @@ class HistoryStore:
         """Deleted for everyone: the row stays, as kind "deleted", to show a
         marker where the message was, but its content is gone. Only a row
         sent by from_device changes."""
-        self._conn.execute(
+        changed = self._conn.execute(
             "UPDATE messages SET kind = 'deleted', text = '', extra = NULL "
             "WHERE network = ? AND id = ? AND from_device = ?",
             (network, msg_id, from_device),
-        )
+        ).rowcount
+        if changed:
+            self._conn.execute("DELETE FROM reactions WHERE network = ? AND target_id = ?", (network, msg_id))
         self._conn.commit()
 
     def hide_message(self, network: str, msg_id: str) -> None:
@@ -140,7 +150,30 @@ class HistoryStore:
             "UPDATE messages SET kind = 'hidden', text = '', extra = NULL WHERE network = ? AND id = ?",
             (network, msg_id),
         )
+        self._conn.execute("DELETE FROM reactions WHERE network = ? AND target_id = ?", (network, msg_id))
         self._conn.commit()
+
+    def set_reaction(self, network: str, target_id: str, emoji: str, device_id: str, nick: str, present: bool) -> None:
+        """Records one device's reaction on a message, or its removal."""
+        if present:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO reactions (network, target_id, emoji, device_id, nick) VALUES (?, ?, ?, ?, ?)",
+                (network, target_id, emoji, device_id, nick),
+            )
+        else:
+            self._conn.execute(
+                "DELETE FROM reactions WHERE network = ? AND target_id = ? AND emoji = ? AND device_id = ?",
+                (network, target_id, emoji, device_id),
+            )
+        self._conn.commit()
+
+    def reactions(self, network: str) -> list[tuple[str, str, str, str]]:
+        """(target_id, emoji, device_id, nick) for every reaction kept on
+        this network, oldest first."""
+        return self._conn.execute(
+            "SELECT target_id, emoji, device_id, nick FROM reactions WHERE network = ? ORDER BY rowid",
+            (network,),
+        ).fetchall()
 
     def prune(self, network: str, retain_count: int, retain_days: float) -> None:
         """Both caps are independent and additive — a positive value on
@@ -156,6 +189,10 @@ class HistoryStore:
                 ")",
                 (network, network, retain_count),
             )
+        self._conn.execute(
+            "DELETE FROM reactions WHERE network = ? AND target_id NOT IN (SELECT id FROM messages WHERE network = ?)",
+            (network, network),
+        )
         self._conn.commit()
 
     def close(self) -> None:

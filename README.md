@@ -223,6 +223,10 @@ wider than the chat, work with replies and reactions, and are kept in
 message history; `chat`, `chat --tui`, and older clients show them as
 plain text.
 
+**Reactions**: the smiley under a message picks a quick reaction; click a
+reaction pill to add or take back your own. Reactions are kept in message
+history with the message they're on, and go when it's deleted.
+
 **Replies**: the reply arrow under a message (next to the react button)
 quotes it above the message box; what you send next carries that quote at
 its top. Click a quote to jump to the original, and Esc or × cancels the
