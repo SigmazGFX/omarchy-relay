@@ -240,8 +240,16 @@ transfers without keeping a chat window open.
 
 A peer can ask another machine to run a **named** action over the relay —
 e.g. checking status, restarting a service, triggering a script that's
-already there. **Off by default.** Currently serviced by `chat` and
-`daemon` (not yet by `gui`/`chat --tui`).
+already there. **Off by default.** Serviced by `chat`, `daemon`, and
+`gui` (not yet by `chat --tui`) — whichever of those you have running is
+what responds; don't run more than one at a time under the same identity,
+since each connects to the broker with the same MQTT client ID (your
+device_id) and the broker disconnects whichever held it first.
+
+In `gui`, Settings → "Manage trusted peers and commands" has the same
+controls as the CLI below: a global on/off switch, a trusted-peers list
+(pick an online peer or type a device ID), and a named-commands table.
+Changes apply immediately, no separate Save step.
 
 **The security model, in one sentence: the receiving machine's own config
 always decides what runs on it — a sender can pick a name, never supply

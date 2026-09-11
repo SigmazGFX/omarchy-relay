@@ -35,6 +35,7 @@ from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
+from .remote_actions import RemoteActionHandler
 from .transfer import FileReceiver, send_file
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -432,6 +433,13 @@ class RelayWindow(Adw.ApplicationWindow):
 
         self.client = RelayClient(cfg)
         self.receiver = FileReceiver(cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
+        # Services incoming remote-action requests directly on this same
+        # connection — no separate `daemon` process. Running `daemon`
+        # alongside an already-open `gui` under the same identity would
+        # connect a second MQTT client with the same client_id (=
+        # device_id), and the broker disconnects whichever held it first —
+        # a flapping loop, not redundancy. One connection does everything.
+        self.action_handler = RemoteActionHandler(cfg, on_handled=self._threaded(self._on_action_handled))
 
         self._connection_state = "connecting"
         # Message grouping: whose bubble came last, when, and the bubble
@@ -666,6 +674,12 @@ class RelayWindow(Adw.ApplicationWindow):
         self.client.on_presence = self._threaded(self._handle_presence)
         self.client.on_file_meta = self._threaded(self.receiver.handle_meta)
         self.client.on_file_chunk = self._threaded(self.receiver.handle_chunk)
+        # Not wrapped in _threaded: handle_request runs subprocess.run()
+        # (up to 20s) and a client.publish() — neither touches GTK, and
+        # wrapping it would block the whole window for however long the
+        # command takes. Only the on_handled callback above (which does
+        # touch a widget) needs the main-loop marshalling.
+        self.client.on_action_request = lambda obj: self.action_handler.handle_request(self.client, obj)
         self.peers.on_removed = self._threaded(self._handle_peer_removed)
 
     # -- thread marshalling ------------------------------------------------
@@ -1068,6 +1082,11 @@ class RelayWindow(Adw.ApplicationWindow):
         if self.cfg.show_presence:
             self._append_system(f"{last_known.get('nick', device_id)} went offline")
         self._refresh_peer_list()
+
+    def _on_action_handled(self, request_obj: dict, outcome: str) -> None:
+        nick = request_obj.get("nick", "?")
+        action = request_obj.get("action", "?")
+        self._append_system(f"{nick} triggered '{action}' ({outcome})")
 
     def _handle_typing(self, obj: dict) -> None:
         device_id = obj.get("from")
@@ -1514,6 +1533,20 @@ class RelayWindow(Adw.ApplicationWindow):
         chat_group.add(history_days_row)
         page.add(chat_group)
 
+        remote_group = Adw.PreferencesGroup(
+            title="Remote Commands",
+            description="Let trusted peers trigger fixed commands on this machine.",
+        )
+        remote_row = Adw.ActionRow(
+            title="Manage trusted peers and commands",
+            subtitle="Currently " + ("enabled" if self.cfg.remote_actions_enabled else "disabled"),
+            activatable=True,
+        )
+        remote_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+        remote_row.connect("activated", lambda _r: self._on_open_remote_commands())
+        remote_group.add(remote_row)
+        page.add(remote_group)
+
         toasts = Adw.ToastOverlay(child=page)
         toolbar_view = Adw.ToolbarView(content=toasts)
         toolbar_view.add_top_bar(header)
@@ -1637,6 +1670,164 @@ class RelayWindow(Adw.ApplicationWindow):
         save_btn.connect("clicked", on_save)
         dialog.present(self)
 
+    def _on_open_remote_commands(self) -> None:
+        dialog = Adw.Dialog(title="Remote Commands", content_width=480, content_height=680)
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+        close_btn = Gtk.Button(label="Close")
+        close_btn.connect("clicked", lambda _b: dialog.close())
+        header.pack_start(close_btn)
+
+        page = Adw.PreferencesPage()
+        toasts = Adw.ToastOverlay(child=page)
+
+        intro_group = Adw.PreferencesGroup(
+            description=(
+                "A peer can only ever trigger a NAME from the table below — the command "
+                "that actually runs is fixed here and never sent by them. Off by default."
+            )
+        )
+        enabled_row = Adw.SwitchRow(title="Allow trusted peers to trigger commands on this machine")
+        enabled_row.set_active(self.cfg.remote_actions_enabled)
+
+        def on_enabled_toggled(row: Adw.SwitchRow, _pspec) -> None:
+            self.cfg.remote_actions_enabled = row.get_active()
+            self.cfg.save()
+
+        enabled_row.connect("notify::active", on_enabled_toggled)
+        intro_group.add(enabled_row)
+        page.add(intro_group)
+
+        # -- Trusted peers ----------------------------------------------------
+        trust_group = Adw.PreferencesGroup(
+            title="Trusted Peers",
+            description="Only these devices may trigger the named commands below.",
+        )
+        page.add(trust_group)
+        trust_rows: list[Adw.ActionRow] = []
+
+        def render_trust_rows() -> None:
+            for row in trust_rows:
+                trust_group.remove(row)
+            trust_rows.clear()
+            online = self.peers.snapshot()
+            for device_id, level in sorted(self.cfg.remote_actions_peers.items()):
+                nick = online.get(device_id, {}).get("nick")
+                row = Adw.ActionRow(
+                    title=nick if nick else device_id,
+                    subtitle=device_id if nick else f"trust: {level}",
+                )
+                remove_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+
+                def on_remove(_b, dev: str = device_id) -> None:
+                    self.cfg.remote_actions_peers.pop(dev, None)
+                    self.cfg.save()
+                    render_trust_rows()
+
+                remove_btn.connect("clicked", on_remove)
+                row.add_suffix(remove_btn)
+                trust_group.add(row)
+                trust_rows.append(row)
+
+        render_trust_rows()
+
+        add_trust_group = Adw.PreferencesGroup()
+        online_now = {d: v for d, v in self.peers.snapshot().items() if d != self.cfg.device_id}
+        online_ids = sorted(online_now.keys())
+        peer_choices = ["Pick an online peer…"] + [f"{online_now[d].get('nick', '?')} ({d})" for d in online_ids]
+        peer_combo = Adw.ComboRow(title="Online peers")
+        peer_combo.set_model(Gtk.StringList.new(peer_choices))
+        device_entry = Adw.EntryRow(title="Device ID")
+
+        def on_peer_picked(combo: Adw.ComboRow, _pspec) -> None:
+            idx = combo.get_selected()
+            if 1 <= idx <= len(online_ids):
+                device_entry.set_text(online_ids[idx - 1])
+
+        peer_combo.connect("notify::selected", on_peer_picked)
+        add_trust_group.add(peer_combo)
+        add_trust_group.add(device_entry)
+        add_trust_row = Adw.ActionRow(title="Trust this device", activatable=True)
+        add_trust_btn = Gtk.Button(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat", "circular"])
+
+        def on_add_trust(_b) -> None:
+            dev = device_entry.get_text().strip()
+            if not dev:
+                toasts.add_toast(Adw.Toast(title="Enter or pick a device ID"))
+                return
+            self.cfg.remote_actions_peers[dev] = "commands"
+            self.cfg.save()
+            device_entry.set_text("")
+            render_trust_rows()
+            toasts.add_toast(Adw.Toast(title=f"Trusted {dev}"))
+
+        add_trust_btn.connect("clicked", on_add_trust)
+        add_trust_row.add_suffix(add_trust_btn)
+        add_trust_row.set_activatable_widget(add_trust_btn)
+        add_trust_group.add(add_trust_row)
+        page.add(add_trust_group)
+
+        # -- Named commands ----------------------------------------------------
+        commands_group = Adw.PreferencesGroup(
+            title="Named Commands",
+            description="The fixed shell command that runs locally when a trusted peer triggers this name.",
+        )
+        page.add(commands_group)
+        command_rows: list[Adw.ActionRow] = []
+
+        def render_command_rows() -> None:
+            for row in command_rows:
+                commands_group.remove(row)
+            command_rows.clear()
+            for name, shell_cmd in sorted(self.cfg.remote_actions_commands.items()):
+                row = Adw.ActionRow(title=name, subtitle=shell_cmd)
+                remove_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+
+                def on_remove(_b, nm: str = name) -> None:
+                    self.cfg.remote_actions_commands.pop(nm, None)
+                    self.cfg.save()
+                    render_command_rows()
+
+                remove_btn.connect("clicked", on_remove)
+                row.add_suffix(remove_btn)
+                commands_group.add(row)
+                command_rows.append(row)
+
+        render_command_rows()
+
+        add_command_group = Adw.PreferencesGroup()
+        name_entry = Adw.EntryRow(title="Name")
+        shell_entry = Adw.EntryRow(title="Shell command")
+        add_command_group.add(name_entry)
+        add_command_group.add(shell_entry)
+        add_command_row = Adw.ActionRow(title="Add command", activatable=True)
+        add_command_btn = Gtk.Button(
+            icon_name="list-add-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat", "circular"]
+        )
+
+        def on_add_command(_b) -> None:
+            name = name_entry.get_text().strip()
+            shell_cmd = shell_entry.get_text().strip()
+            if not name or not shell_cmd:
+                toasts.add_toast(Adw.Toast(title="Name and shell command are both required"))
+                return
+            self.cfg.remote_actions_commands[name] = shell_cmd
+            self.cfg.save()
+            name_entry.set_text("")
+            shell_entry.set_text("")
+            render_command_rows()
+            toasts.add_toast(Adw.Toast(title=f"Added '{name}'"))
+
+        add_command_btn.connect("clicked", on_add_command)
+        add_command_row.add_suffix(add_command_btn)
+        add_command_row.set_activatable_widget(add_command_btn)
+        add_command_group.add(add_command_row)
+        page.add(add_command_group)
+
+        toolbar_view = Adw.ToolbarView(content=toasts)
+        toolbar_view.add_top_bar(header)
+        dialog.set_child(toolbar_view)
+        dialog.present(self)
+
     def _apply_new_config(self, new_cfg: Config) -> None:
         self.client.disconnect()
 
@@ -1647,6 +1838,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._typing_peers.clear()
         self._typing_sent_at = 0.0
         self.receiver = FileReceiver(new_cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
+        self.action_handler = RemoteActionHandler(new_cfg, on_handled=self._threaded(self._on_action_handled))
         self.client = RelayClient(new_cfg)
         self._wire_client_callbacks()
 
