@@ -8,6 +8,7 @@ update is marshalled onto GTK's main loop via GLib.idle_add.
 """
 from __future__ import annotations
 
+import base64
 import dataclasses
 import math
 import os
@@ -47,6 +48,12 @@ _IMAGE_MAX_WIDTH = 320
 _IMAGE_MAX_HEIGHT = 260
 _NICK_COLORS = 6
 _CONTENT_MAX_WIDTH = 860
+
+# Typing status: while the composer has text and keeps changing, a "typing"
+# event goes out at most this often; a peer's indicator lapses if no refresh
+# arrives in time (which also covers a lost "stopped").
+_TYPING_SEND_INTERVAL = 3.0
+_TYPING_EXPIRE_SECONDS = 6
 
 # Every color here is one of libadwaita's own CSS variables, so the window
 # follows light/dark mode out of the box; _omarchy_theme_css() then points
@@ -193,6 +200,9 @@ button.send-button {
 .sidebar-heading {
   margin: 6px 18px 2px 18px;
 }
+.typing {
+  color: var(--accent-color);
+}
 .presence-dot {
   min-width: 10px;
   min-height: 10px;
@@ -289,6 +299,80 @@ def _omarchy_theme_css(colors: dict[str, str], dark: bool) -> str:
     return f":root {{\n{body}\n}}\n"
 
 
+# WhatsApp-style doodle wallpaper behind the chat log: a tile of little line
+# drawings, repeated. Each path is drawn around (0, 0) in a ~24px box. The
+# tile is inked in the theme's own foreground color at a low opacity, so it
+# reads as texture rather than content and follows theme switches too.
+_WALLPAPER_TILE = 280
+_WALLPAPER_DOODLES = (
+    # chat bubble
+    "M-10 -7h20a3 3 0 0 1 3 3v9a3 3 0 0 1 -3 3h-11l-6 5v-5h-3a3 3 0 0 1 -3 -3v-9a3 3 0 0 1 3 -3z"
+    "M-5 .5h.01M0 .5h.01M5 .5h.01",
+    # heart
+    "M0 9C-9 3 -12 -2 -10 -6C-8 -10 -3 -10 0 -5C3 -10 8 -10 10 -6C12 -2 9 3 0 9z",
+    # star
+    "M0 -10L2.5 -3.4L9.5 -3.1L4 1.3L5.9 8.1L0 4.2L-5.9 8.1L-4 1.3L-9.5 -3.1L-2.5 -3.4z",
+    # paper plane
+    "M-11 -1L11 -9L4 10L0 2zM0 2L11 -9",
+    # music note
+    "M-3 7V-9L8 -11V4M-3 7A3 2.5 0 1 1 -9 7A3 2.5 0 1 1 -3 7M8 4A3 2.5 0 1 1 2 4A3 2.5 0 1 1 8 4",
+    # camera
+    "M-10 -5h5l2 -3h6l2 3h5a2 2 0 0 1 2 2v11a2 2 0 0 1 -2 2h-20a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2z"
+    "M4 2.5a4 4 0 1 1 -8 0a4 4 0 1 1 8 0",
+    # cloud
+    "M-9 6H9A4 4 0 0 0 9 -2A6 6 0 0 0 -2 -5A6.5 6.5 0 0 0 -9 6z",
+    # smiley
+    "M10 0a10 10 0 1 1 -20 0a10 10 0 1 1 20 0M-3.5 -3h.01M3.5 -3h.01M-5 3q5 5 10 0",
+    # envelope
+    "M-11 -7h22v14h-22zM-11 -7L0 2L11 -7",
+    # lightning bolt
+    "M2 -11L-7 2H0L-2 11L7 -2H0z",
+    # coffee cup
+    "M-8 -3h13v7a6 6 0 0 1 -6 6h-1a6 6 0 0 1 -6 -6zM5 -1h2a3 3 0 0 1 0 6h-2M-4 -10q2 2 0 4M1 -10q2 2 0 4",
+    # crescent moon
+    "M4 -10A10 10 0 1 0 10 5A8 8 0 0 1 4 -10z",
+    # microphone
+    "M0 -11a3.5 3.5 0 0 1 3.5 3.5v6a3.5 3.5 0 0 1 -7 0v-6a3.5 3.5 0 0 1 3.5 -3.5zM-7 -2a7 7 0 0 0 14 0M0 5v5M-4 10h8",
+    # signal waves
+    "M-9 -2A13 13 0 0 1 9 -2M-5.5 2A8 8 0 0 1 5.5 2M-2 6A3 3 0 0 1 2 6M0 10h.01",
+    # sparkle
+    "M0 -10Q1 -1 10 0Q1 1 0 10Q-1 1 -10 0Q-1 -1 0 -10z",
+    # terminal prompt
+    "M-11 -8h22v16h-22zM-7 -3l4 3l-4 3M0 4h6",
+)
+
+
+def _wallpaper_css(ink: str, dark: bool) -> str:
+    rng = random.Random(7)  # fixed seed: the same scattering on every launch
+    cell = _WALLPAPER_TILE // 4
+    marks = []
+    for index, doodle in enumerate(_WALLPAPER_DOODLES):
+        row, col = divmod(index, 4)
+        x = cell * (col + 0.5) + rng.uniform(-8, 8)
+        y = cell * (row + 0.5) + rng.uniform(-8, 8)
+        angle = rng.uniform(-30, 30)
+        marks.append(f'<path transform="translate({x:.1f} {y:.1f}) rotate({angle:.0f}) scale(1.1)" d="{doodle}"/>')
+        # A speck in the gap below-right of each doodle, so there are no
+        # obvious empty lanes between the rows and columns.
+        speck = "h.01" if index % 2 else "m-3 0h6m-3 -3v6"
+        marks.append(f'<path d="M{cell * (col + 1) - 5} {cell * (row + 1) - 5}{speck}"/>')
+    # Rasterized at 2x and scaled back down by background-size, so it stays
+    # crisp on HiDPI screens.
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{_WALLPAPER_TILE * 2}" height="{_WALLPAPER_TILE * 2}"'
+        f' viewBox="0 0 {_WALLPAPER_TILE} {_WALLPAPER_TILE}">'
+        f'<g fill="none" stroke="{ink}" stroke-opacity="{0.07 if dark else 0.08}" stroke-width="1.5"'
+        f' stroke-linecap="round" stroke-linejoin="round">{"".join(marks)}</g></svg>'
+    )
+    data = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return (
+        ".chat-wallpaper {\n"
+        f'  background-image: url("data:image/svg+xml;base64,{data}");\n'
+        f"  background-size: {_WALLPAPER_TILE}px {_WALLPAPER_TILE}px;\n"
+        "}\n"
+    )
+
+
 def _fmt_time(ts: float) -> str:
     return time.strftime("%H:%M", time.localtime(ts))
 
@@ -338,7 +422,9 @@ def _is_emoji_only(text: str, max_len: int = 12) -> bool:
 
 class RelayWindow(Adw.ApplicationWindow):
     def __init__(self, app: "RelayApp", cfg: Config):
-        super().__init__(application=app, title="Omarchy Relay")
+        # Closing only hides the window: the connection stays up so you stay
+        # online and keep getting notifications. RelayApp's Quit disconnects.
+        super().__init__(application=app, title="Omarchy Relay", hide_on_close=True)
         self.cfg = cfg
         self.peers = PeerDirectory()
         self.set_default_size(900, 640)
@@ -369,6 +455,8 @@ class RelayWindow(Adw.ApplicationWindow):
         self._recording_started_at: float = 0.0
         self._recording_timer_id: Optional[int] = None
         self._voice_players: list[dict] = []  # each: {"player": audio.Player | None, "reset": callable}
+        self._typing_sent_at = 0.0  # monotonic time we last told peers we're typing; 0 = we aren't
+        self._typing_peers: dict[str, tuple[str, int]] = {}  # device_id -> (nick, expiry GLib source id)
 
         self._install_theme()
 
@@ -394,7 +482,6 @@ class RelayWindow(Adw.ApplicationWindow):
 
         self._wire_client_callbacks()
 
-        self.connect("close-request", self._on_close_request)
         threading.Thread(target=self._connect_worker, daemon=True).start()
 
     # -- layout --------------------------------------------------------------
@@ -402,6 +489,11 @@ class RelayWindow(Adw.ApplicationWindow):
     def _build_sidebar(self) -> Adw.NavigationPage:
         header = Adw.HeaderBar()
         header.set_title_widget(Adw.WindowTitle(title="Omarchy Relay"))
+        menu = Gio.Menu()
+        menu.append("_Quit", "app.quit")
+        header.pack_end(
+            Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Main Menu", menu_model=menu, primary=True)
+        )
 
         self.online_heading = Gtk.Label(xalign=0, css_classes=["caption-heading", "dim-label", "sidebar-heading"])
         self.peer_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["navigation-sidebar"])
@@ -461,7 +553,7 @@ class RelayWindow(Adw.ApplicationWindow):
         adjustment.connect("notify::page-size", lambda adj, _pspec: self._on_chat_resized(adj))
         adjustment.connect("value-changed", self._on_chat_scrolled)
 
-        self.chat_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.chat_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, css_classes=["chat-wallpaper"])
         self.chat_stack.add_named(empty_page, "empty")
         self.chat_stack.add_named(self.chat_scroller, "chat")
 
@@ -561,10 +653,15 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _reload_theme(self) -> None:
         dark = Adw.StyleManager.get_default().get_dark()
-        self._css_provider.load_from_string(_BASE_CSS + _omarchy_theme_css(_omarchy_theme_colors(), dark))
+        colors = _omarchy_theme_colors()
+        theme_css = _omarchy_theme_css(colors, dark)
+        # A non-empty theme_css means the Omarchy palette validated and applies.
+        ink = colors["foreground"] if theme_css else ("#ffffff" if dark else "#000000")
+        self._css_provider.load_from_string(_BASE_CSS + theme_css + _wallpaper_css(ink, dark))
 
     def _wire_client_callbacks(self) -> None:
         self.client.on_chat = self._threaded(self._handle_chat)
+        self.client.on_typing = self._threaded(self._handle_typing)
         self.client.on_dm = self._threaded(self._handle_dm)
         self.client.on_presence = self._threaded(self._handle_presence)
         self.client.on_file_meta = self._threaded(self.receiver.handle_meta)
@@ -604,7 +701,8 @@ class RelayWindow(Adw.ApplicationWindow):
     def _update_status(self) -> None:
         others = sum(1 for device_id in self.peers.snapshot() if device_id != self.cfg.device_id)
         state = {"connecting": "Connecting…", "connected": "Connected", "failed": "Not connected"}[self._connection_state]
-        self.title_widget.set_subtitle(f"{others} online" if self._connection_state == "connected" else state)
+        subtitle = f"{others} online" if self._connection_state == "connected" else state
+        self.title_widget.set_subtitle(self._typing_summary() or subtitle)
         self.profile_status.set_label(state)
         self.online_heading.set_label(f"Online — {others}")
 
@@ -874,9 +972,12 @@ class RelayWindow(Adw.ApplicationWindow):
                 xalign=0,
                 ellipsize=Pango.EllipsizeMode.END,
             )
-            device = Gtk.Label(
-                label=device_id, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["caption", "dim-label"]
-            )
+            if device_id in self._typing_peers:
+                device = Gtk.Label(label="typing…", xalign=0, css_classes=["caption", "typing"])
+            else:
+                device = Gtk.Label(
+                    label=device_id, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["caption", "dim-label"]
+                )
             labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
             labels.append(name)
             labels.append(device)
@@ -892,6 +993,7 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
             return
+        self._clear_typing(obj.get("from", ""))
         is_mine = obj.get("from") == self.cfg.device_id
         self._append_text(obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine)
         self._remember(obj, is_dm=False, peer_device_id=None)
@@ -962,9 +1064,46 @@ class RelayWindow(Adw.ApplicationWindow):
         self._refresh_peer_list()
 
     def _handle_peer_removed(self, device_id: str, last_known: dict) -> None:
+        self._clear_typing(device_id)
         if self.cfg.show_presence:
             self._append_system(f"{last_known.get('nick', device_id)} went offline")
         self._refresh_peer_list()
+
+    def _handle_typing(self, obj: dict) -> None:
+        device_id = obj.get("from")
+        if not device_id or device_id == self.cfg.device_id:
+            return  # our own events echo back on the broadcast topic
+        if obj.get("state") != "typing":
+            self._clear_typing(device_id)
+            return
+        previous = self._typing_peers.get(device_id)
+        if previous:
+            GLib.source_remove(previous[1])
+        expiry = GLib.timeout_add_seconds(_TYPING_EXPIRE_SECONDS, self._on_typing_expired, device_id)
+        self._typing_peers[device_id] = (obj.get("nick", "?"), expiry)
+        if not previous:
+            self._refresh_peer_list()
+
+    def _clear_typing(self, device_id: str) -> None:
+        entry = self._typing_peers.pop(device_id, None)
+        if entry:
+            GLib.source_remove(entry[1])
+            self._refresh_peer_list()
+
+    def _on_typing_expired(self, device_id: str) -> bool:
+        self._typing_peers.pop(device_id, None)
+        self._refresh_peer_list()
+        return False
+
+    def _typing_summary(self) -> str:
+        nicks = sorted(nick for nick, _expiry in self._typing_peers.values())
+        if not nicks:
+            return ""
+        if len(nicks) == 1:
+            return f"{nicks[0]} is typing…"
+        if len(nicks) == 2:
+            return f"{nicks[0]} and {nicks[1]} are typing…"
+        return f"{len(nicks)} people are typing…"
 
     def _on_file_complete(self, meta: dict, path: Path) -> None:
         if meta.get("kind") == "voice" or path.suffix.lower() in _AUDIO_EXTENSIONS:
@@ -984,7 +1123,30 @@ class RelayWindow(Adw.ApplicationWindow):
     # -- UI actions ----------------------------------------------------------
 
     def _on_entry_changed(self, entry: Gtk.Entry) -> None:
-        self.send_btn.set_sensitive(bool(entry.get_text().strip()))
+        has_text = bool(entry.get_text().strip())
+        self.send_btn.set_sensitive(has_text)
+        if has_text:
+            now = time.monotonic()
+            if now - self._typing_sent_at >= _TYPING_SEND_INTERVAL:
+                self._typing_sent_at = now
+                self._send_typing("typing")
+        elif self._typing_sent_at:
+            # Replacing the text (set_text, pasting over a selection) empties
+            # the entry for an instant first — only an entry that's still
+            # empty once the edit settles means we've stopped.
+            GLib.idle_add(self._on_entry_maybe_emptied)
+
+    def _on_entry_maybe_emptied(self) -> bool:
+        if self._typing_sent_at and not self.entry.get_text().strip():
+            self._typing_sent_at = 0.0
+            self._send_typing("stopped")
+        return False
+
+    def _send_typing(self, state: str) -> None:
+        if self.client.connected.is_set():
+            self.client.send_typing(
+                {"from": self.cfg.device_id, "nick": self.cfg.nickname, "ts": time.time(), "state": state}
+            )
 
     def _on_send(self, _widget) -> None:
         text = self.entry.get_text().strip()
@@ -1268,10 +1430,6 @@ class RelayWindow(Adw.ApplicationWindow):
         # safe to clean up shortly after rather than keep it around.
         GLib.timeout_add_seconds(5, lambda: tmp_path.unlink(missing_ok=True) or False)
 
-    def _on_close_request(self, _window) -> bool:
-        self.client.disconnect()
-        return False  # allow the window to close
-
     # -- settings --------------------------------------------------------
 
     def _on_open_settings(self, _widget) -> None:
@@ -1484,6 +1642,10 @@ class RelayWindow(Adw.ApplicationWindow):
 
         self.cfg = new_cfg
         self.peers = PeerDirectory()
+        for _nick, expiry in self._typing_peers.values():
+            GLib.source_remove(expiry)
+        self._typing_peers.clear()
+        self._typing_sent_at = 0.0
         self.receiver = FileReceiver(new_cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
         self.client = RelayClient(new_cfg)
         self._wire_client_callbacks()
@@ -1508,8 +1670,20 @@ class RelayApp(Adw.Application):
         self.cfg = cfg
         self.window: Optional[RelayWindow] = None
         self.connect("activate", self._on_activate)
+        self.connect("shutdown", self._on_shutdown)
+
+        # Closing the window only hides it, so this is how you actually go
+        # offline: Quit in the sidebar's main menu, or Ctrl+Q.
+        quit_action = Gio.SimpleAction.new("quit", None)
+        quit_action.connect("activate", lambda *_: self.quit())
+        self.add_action(quit_action)
+
+    def _on_shutdown(self, _app: "RelayApp") -> None:
+        if self.window is not None:
+            self.window.client.disconnect()
 
     def _on_activate(self, app: "RelayApp") -> None:
+        self.set_accels_for_action("app.quit", ["<Control>q"])
         # GTK/GIO single-instance apps re-fire "activate" on the SAME
         # running process for every subsequent launch (app launcher click,
         # `omarchy-relay gui` run again, etc.) — without this guard each

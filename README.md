@@ -73,6 +73,12 @@ below for the manual/customizable path instead.
 - **Chat** is a broadcast topic within the network; **DMs** are routed to a
   per-device topic, but note DMs are *routed*, not cryptographically
   private from other members — see [Security model](#security-model).
+- **Typing status** has its own encrypted broadcast topic, separate from
+  chat. While the message box has text that keeps changing, `gui` sends a
+  "typing" event at most every 3 seconds (QoS 0 — they're disposable), and
+  "stopped" once the box empties or the message goes out. Receivers drop
+  the indicator if no refresh arrives within 6 seconds. Older clients never
+  subscribe to the topic, so they never see these events.
 - **Files** are chunked, base64-encoded, encrypted per-chunk, and sent as
   a stream of MQTT messages with an explicit index. The receiver
   reassembles by seeking to `index * chunk_size` (tolerant of MQTT's
@@ -195,6 +201,15 @@ files land in `transfer.downloads_dir` alongside received ones.
 
 **`/sparkles`**: any message containing this word sets off a five-second
 pixie-dust burst on every client that renders it, sender included.
+
+**Typing status**: while someone is typing in `gui`, the chat header says
+so ("Alice is typing…"), and their sidebar row shows "typing…". `chat` and
+`chat --tui` neither send nor show it.
+
+**Closing the window keeps you connected**: it hides into the background,
+so you stay online and still get notifications and dings. The bar icon or
+app launcher brings the same window back. To actually go offline, use
+**Quit** in the sidebar's main menu, or Ctrl+Q.
 
 **Message history**: recent messages are kept locally (SQLite, under
 `~/.local/share/omarchy-relay/history.db`, scoped per network) and shown

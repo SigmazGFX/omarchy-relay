@@ -88,6 +88,7 @@ class RelayClient:
         self.on_file_meta: Optional[Callable[[dict], None]] = None
         self.on_file_chunk: Optional[Callable[[dict], None]] = None
         self.on_action_request: Optional[Callable[[dict], None]] = None
+        self.on_typing: Optional[Callable[[dict], None]] = None
         self.on_bad_message: Optional[Callable[[str, Exception], None]] = None
 
         # Remote-action request/result matching (see remote_actions.py).
@@ -120,6 +121,11 @@ class RelayClient:
     def send_dm(self, target_device_id: str, obj: dict) -> None:
         self._publish_encrypted(f"{self.ns}/dm/{target_device_id}", obj)
 
+    def send_typing(self, obj: dict) -> None:
+        # Resent every few seconds while typing continues, so QoS 0: a dropped
+        # one just means the indicator lapses a moment early.
+        self._publish_encrypted(f"{self.ns}/typing", obj, qos=0)
+
     def send_file_meta(self, transfer_id: str, obj: dict) -> None:
         self._publish_encrypted(f"{self.ns}/file/{transfer_id}/meta", obj)
 
@@ -145,6 +151,7 @@ class RelayClient:
             [
                 (f"{self.ns}/chat", 1),
                 (f"{self.ns}/dm/{self.cfg.device_id}", 1),
+                (f"{self.ns}/typing", 0),
                 (f"{self.ns}/presence/+", 1),
                 (f"{self.ns}/file/+/meta", 1),
                 (f"{self.ns}/file/+/chunk", 1),
@@ -170,6 +177,8 @@ class RelayClient:
                 self._dispatch_encrypted(msg.payload, self.on_chat)
             elif topic == f"{self.ns}/dm/{self.cfg.device_id}":
                 self._dispatch_encrypted(msg.payload, self.on_dm)
+            elif topic == f"{self.ns}/typing":
+                self._dispatch_encrypted(msg.payload, self.on_typing)
             elif len(parts) >= 2 and parts[-2] == "presence":
                 self._handle_presence(parts[-1], msg.payload)
             elif len(parts) >= 2 and parts[-1] == "meta" and "file" in parts:
