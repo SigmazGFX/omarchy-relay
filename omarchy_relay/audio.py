@@ -15,7 +15,7 @@ from typing import Callable, Optional
 import gi
 
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst  # noqa: E402
+from gi.repository import GLib, Gst  # noqa: E402
 
 Gst.init(None)
 
@@ -38,9 +38,29 @@ class Recorder:
 
     def __init__(self, path: Path, source: str = RECORD_SOURCE) -> None:
         self.path = path
-        self._pipeline = Gst.parse_launch(f"{source} ! {_RECORD_REST}")
+        # Fires (on the GLib main loop, via the bus signal watch below — no
+        # extra marshalling needed) if the pipeline errors out *after*
+        # start() has already returned successfully, e.g. a live source
+        # that negotiates fine but fails to actually produce data. Without
+        # this, that failure would only surface once stop() is called.
+        self.on_error: Optional[Callable[[str], None]] = None
+        try:
+            self._pipeline = Gst.parse_launch(f"{source} ! {_RECORD_REST}")
+        except GLib.Error as exc:
+            # Wrapped so callers only need to catch one exception type —
+            # a missing/misconfigured GStreamer element surfaces the same
+            # way as a runtime failure to start capturing.
+            raise RecordingError(f"couldn't set up recording: {exc}") from exc
         self._pipeline.get_by_name("sink").set_property("location", str(path))
         self._started_at: Optional[float] = None
+        bus = self._pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self._on_message)
+
+    def _on_message(self, _bus, message) -> None:
+        if message.type == Gst.MessageType.ERROR and self.on_error:
+            err, _debug = message.parse_error()
+            self.on_error(err.message)
 
     def start(self) -> None:
         ret = self._pipeline.set_state(Gst.State.PLAYING)

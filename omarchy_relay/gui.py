@@ -99,9 +99,19 @@ _BASE_CSS = """
   font-size: 1.6em;
 }
 
+/* background-color alone is unreliable on a .flat button — the theme's
+   flat styling tends to suppress it, leaving no visible change at all.
+   color reliably tints the symbolic icon instead. */
 button.recording {
-  background-color: #e01b24;
-  color: white;
+  color: #e01b24;
+}
+
+.recording-dot {
+  color: #e01b24;
+  font-size: 1.1em;
+}
+.recording-indicator label {
+  color: #e01b24;
 }
 
 .reactions-row {
@@ -356,6 +366,8 @@ class RelayWindow(Adw.ApplicationWindow):
         self._sparkle_active = False
         self._recorder: Optional[audio.Recorder] = None
         self._recording_path: Optional[Path] = None
+        self._recording_started_at: float = 0.0
+        self._recording_timer_id: Optional[int] = None
         self._voice_players: list[dict] = []  # each: {"player": audio.Player | None, "reset": callable}
 
         self._install_theme()
@@ -486,9 +498,22 @@ class RelayWindow(Adw.ApplicationWindow):
             popover=emoji_chooser,
         )
 
+        # Swapped in for self.entry while recording — unmissable even
+        # without a real audio meter: a red dot, "Recording...", and a
+        # live-ticking timer, so there's no ambiguity about whether a click
+        # actually started anything.
+        self.recording_indicator = Gtk.Box(
+            spacing=8, hexpand=True, valign=Gtk.Align.CENTER, visible=False, css_classes=["recording-indicator"]
+        )
+        self.recording_indicator.append(Gtk.Label(label="⏺", css_classes=["recording-dot"]))
+        self.recording_indicator.append(Gtk.Label(label="Recording…"))
+        self.recording_time_label = Gtk.Label(label="0:00", hexpand=True, xalign=0)
+        self.recording_indicator.append(self.recording_time_label)
+
         field = Gtk.Box(spacing=2, hexpand=True, css_classes=["composer-field"])
         field.append(attach_btn)
         field.append(self.entry)
+        field.append(self.recording_indicator)
         field.append(emoji_btn)
 
         self.send_btn = Gtk.Button(
@@ -1105,18 +1130,50 @@ class RelayWindow(Adw.ApplicationWindow):
             self.toast_overlay.add_toast(Adw.Toast(title=str(exc)))
             tmp_path.unlink(missing_ok=True)
             return
+        recorder.on_error = self._on_recording_error
         self._recorder = recorder
         self._recording_path = tmp_path
+        self._recording_started_at = time.time()
         self.mic_btn.set_icon_name("media-playback-stop-symbolic")
         self.mic_btn.add_css_class("recording")
         self.mic_btn.set_tooltip_text("Stop recording and send")
+        self.entry.set_visible(False)
+        self.recording_indicator.set_visible(True)
+        self.recording_time_label.set_label("0:00")
+        self._recording_timer_id = GLib.timeout_add(200, self._tick_recording_timer)
+
+    def _tick_recording_timer(self) -> bool:
+        if self._recorder is None:
+            return False
+        self.recording_time_label.set_label(audio.format_duration(time.time() - self._recording_started_at))
+        return True
+
+    def _reset_recording_ui(self) -> None:
+        self.mic_btn.set_icon_name("audio-input-microphone-symbolic")
+        self.mic_btn.remove_css_class("recording")
+        self.mic_btn.set_tooltip_text("Record a voice message")
+        self.entry.set_visible(True)
+        self.recording_indicator.set_visible(False)
+        if self._recording_timer_id is not None:
+            GLib.source_remove(self._recording_timer_id)
+            self._recording_timer_id = None
+
+    def _on_recording_error(self, message: str) -> None:
+        # Fires asynchronously if the pipeline fails *after* start()
+        # already returned — e.g. a live source that negotiates fine but
+        # produces no data. Without this the failure would stay invisible
+        # until stop() was clicked, and even then might just look like a
+        # too-short recording.
+        if self._recorder is None:
+            return  # already stopped through the normal path
+        self._recorder = None
+        self._reset_recording_ui()
+        self.toast_overlay.add_toast(Adw.Toast(title=f"Recording failed: {message}"))
 
     def _stop_recording(self) -> None:
         recorder, path = self._recorder, self._recording_path
         self._recorder = None
-        self.mic_btn.set_icon_name("audio-input-microphone-symbolic")
-        self.mic_btn.remove_css_class("recording")
-        self.mic_btn.set_tooltip_text("Record a voice message")
+        self._reset_recording_ui()
 
         def work() -> None:
             # EOS finalization can take a moment — off the GTK thread so
@@ -1128,7 +1185,7 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _send_voice_message(self, tmp_path: Path, duration: float) -> bool:
         if duration < 0.3 or tmp_path.stat().st_size == 0:
-            self._append_system("Recording too short, not sent")
+            self.toast_overlay.add_toast(Adw.Toast(title="Recording too short, not sent"))
             tmp_path.unlink(missing_ok=True)
             return False
         # Move it into downloads_dir (not deleted after send) so the sender
@@ -1144,7 +1201,7 @@ class RelayWindow(Adw.ApplicationWindow):
         try:
             send_file(self.client, self.cfg, final_path, to="*", extra_meta={"kind": "voice", "duration": duration})
         except (FileNotFoundError, ValueError) as exc:
-            self._append_system(str(exc))
+            self.toast_overlay.add_toast(Adw.Toast(title=str(exc)))
             return False
         self._append_voice({"nick": self.cfg.nickname, "duration": duration}, final_path)
         return False
