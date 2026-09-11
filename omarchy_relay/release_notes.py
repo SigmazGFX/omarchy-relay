@@ -19,6 +19,21 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.9.1",
+        date="2026-09-11",
+        items=(
+            (
+                "Agent message alerts",
+                "An agent message from a trusted peer now pops a desktop notification with a sound, the "
+                "same as a direct message.",
+            ),
+            (
+                "Agent messages are saved",
+                "Fixed received agent messages failing to reach the inbox (omarchy-relay agent inbox).",
+            ),
+        ),
+    ),
+    Release(
         version="0.9.0",
         date="2026-09-11",
         items=(
