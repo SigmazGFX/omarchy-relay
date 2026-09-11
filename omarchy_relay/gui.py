@@ -87,6 +87,41 @@ _BASE_CSS = """
 .bubble .stamp {
   opacity: 0.65;
 }
+.bubble .emoji-only {
+  font-size: 2.4em;
+}
+
+.reactions-row {
+  margin-top: 2px;
+}
+.reaction-pill {
+  min-width: 0;
+  min-height: 0;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  font-size: 0.85em;
+  background-color: color-mix(in srgb, var(--card-bg-color), var(--card-fg-color) 6%);
+  box-shadow: 0 1px 1px var(--card-shade-color);
+}
+.reaction-pill.mine {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 30%, var(--card-bg-color));
+  box-shadow: inset 0 0 0 1px var(--accent-color);
+}
+.react-btn {
+  min-width: 22px;
+  min-height: 22px;
+  opacity: 0.55;
+}
+.react-btn:hover {
+  opacity: 1;
+}
+.reaction-popover .reaction-pick {
+  font-size: 1.3em;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 9999px;
+}
 
 .nick-0 { color: oklab(from var(--relay-nick-0) var(--standalone-color-oklab)); }
 .nick-1 { color: oklab(from var(--relay-nick-1) var(--standalone-color-oklab)); }
@@ -243,6 +278,32 @@ def _nick_color_class(nick: str) -> str:
     return f"nick-{zlib.crc32(nick.encode()) % _NICK_COLORS}"
 
 
+# Covers the emoji-bearing Unicode blocks in one contiguous sweep per range
+# (unassigned code points inside them just never match), plus variation
+# selector/ZWJ/keycap modifiers so multi-codepoint sequences (flags, skin
+# tones, ZWJ combos) still count as "emoji" rather than breaking the match.
+_EMOJI_ONLY_RE = re.compile(
+    r"^[\s0-9"
+    r"\U0001F300-\U0001FAFF"
+    r"\U00002600-\U000027BF"
+    r"\U00002300-\U000023FF"
+    r"\U00002B00-\U00002BFF"
+    r"\U0001F1E6-\U0001F1FF"
+    r"️‍⃣]+$"
+)
+
+
+_QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
+
+
+def _is_emoji_only(text: str, max_len: int = 12) -> bool:
+    """A short WhatsApp/iMessage-style check: render standalone emoji (with
+    no other text) larger in the bubble. max_len caps it so someone can't
+    get a giant wall of emoji."""
+    stripped = text.strip()
+    return bool(stripped) and len(stripped) <= max_len and bool(_EMOJI_ONLY_RE.match(stripped))
+
+
 class RelayWindow(Adw.ApplicationWindow):
     def __init__(self, app: "RelayApp", cfg: Config):
         super().__init__(application=app, title="Omarchy Relay")
@@ -264,6 +325,12 @@ class RelayWindow(Adw.ApplicationWindow):
         self._stick_to_bottom = True
         self._scroll_pending = False
         self._chat_extent = (0.0, 0.0)  # (upper, page_size) as of the last layout change
+
+        # Reactions, keyed by message id — session-only, like the rest of the
+        # chat log (nothing here is persisted to disk).
+        self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id"}
+        self._reaction_slots: dict[str, Gtk.Box] = {}  # msg_id -> its reaction-pills row
+        self._reactions: dict[str, dict[str, dict[str, str]]] = {}  # msg_id -> emoji -> device_id -> nick
 
         self._install_theme()
 
@@ -375,9 +442,21 @@ class RelayWindow(Adw.ApplicationWindow):
         paste_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         paste_controller.connect("key-pressed", self._on_entry_key_pressed)
         self.entry.add_controller(paste_controller)
+
+        emoji_chooser = Gtk.EmojiChooser()
+        emoji_chooser.connect("emoji-picked", self._on_emoji_picked)
+        emoji_btn = Gtk.MenuButton(
+            icon_name="face-smile-symbolic",
+            tooltip_text="Insert an emoji",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular"],
+            popover=emoji_chooser,
+        )
+
         field = Gtk.Box(spacing=2, hexpand=True, css_classes=["composer-field"])
         field.append(attach_btn)
         field.append(self.entry)
+        field.append(emoji_btn)
 
         self.send_btn = Gtk.Button(
             icon_name="mail-send-symbolic",
@@ -499,7 +578,17 @@ class RelayWindow(Adw.ApplicationWindow):
     def _stamp(self, ts: float) -> Gtk.Label:
         return Gtk.Label(label=_fmt_time(ts), tooltip_text=_fmt_full_time(ts), css_classes=["caption", "stamp"])
 
-    def _append_bubble(self, bubble: Gtk.Widget, *, nick: str, ts: float, is_mine: bool, is_dm: bool = False) -> None:
+    def _append_bubble(
+        self,
+        bubble: Gtk.Widget,
+        *,
+        nick: str,
+        ts: float,
+        is_mine: bool,
+        is_dm: bool = False,
+        msg_id: Optional[str] = None,
+        dm_peer_device_id: Optional[str] = None,
+    ) -> None:
         """Places a bubble on its side of the chat, folding it into the
         previous message's group when it's the same sender shortly after."""
         key = ("mine",) if is_mine else ("theirs", nick, is_dm)
@@ -530,10 +619,29 @@ class RelayWindow(Adw.ApplicationWindow):
                     sender.append(Gtk.Label(label="Direct message", css_classes=["caption", "dm-tag"]))
                 column.append(sender)
         column.append(bubble)
+        if msg_id:
+            self._message_meta[msg_id] = {"is_dm": is_dm, "peer_device_id": dm_peer_device_id}
+            reactions_row = Gtk.Box(spacing=4, css_classes=["reactions-row"])
+            self._reaction_slots[msg_id] = reactions_row
+            footer = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
+            footer.append(reactions_row)
+            footer.append(self._build_react_button(msg_id))
+            if is_mine:
+                footer.set_halign(Gtk.Align.END)
+            column.append(footer)
         row.append(column)
         self._append_row(row, follow=is_mine)
 
-    def _append_text(self, nick: str, ts: float, text: str, is_mine: bool = False, is_dm: bool = False) -> None:
+    def _append_text(
+        self,
+        nick: str,
+        ts: float,
+        text: str,
+        msg_id: Optional[str] = None,
+        is_mine: bool = False,
+        is_dm: bool = False,
+        dm_peer_device_id: Optional[str] = None,
+    ) -> None:
         body = Gtk.Label(
             label=text,
             xalign=0,
@@ -546,12 +654,16 @@ class RelayWindow(Adw.ApplicationWindow):
             selectable=True,
             max_width_chars=52,
         )
+        if _is_emoji_only(text):
+            body.add_css_class("emoji-only")
         stamp = self._stamp(ts)
         stamp.set_valign(Gtk.Align.END)
         bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
         bubble.append(body)
         bubble.append(stamp)
-        self._append_bubble(bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm)
+        self._append_bubble(
+            bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm, msg_id=msg_id, dm_peer_device_id=dm_peer_device_id
+        )
 
     def _append_system(self, text: str) -> None:
         label = Gtk.Label(
@@ -657,8 +769,11 @@ class RelayWindow(Adw.ApplicationWindow):
     # -- RelayClient callbacks (already marshalled onto the GTK thread) ----
 
     def _handle_chat(self, obj: dict) -> None:
+        if obj.get("type") == "reaction":
+            self._handle_reaction(obj)
+            return
         is_mine = obj.get("from") == self.cfg.device_id
-        self._append_text(obj["nick"], obj["ts"], obj["text"], is_mine=is_mine)
+        self._append_text(obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine)
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
@@ -666,9 +781,27 @@ class RelayWindow(Adw.ApplicationWindow):
             _ding()
 
     def _handle_dm(self, obj: dict) -> None:
-        self._append_text(obj["nick"], obj["ts"], obj["text"], is_dm=True)
+        if obj.get("type") == "reaction":
+            self._handle_reaction(obj)
+            return
+        self._append_text(
+            obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_dm=True, dm_peer_device_id=obj.get("from")
+        )
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
+
+    def _handle_reaction(self, obj: dict) -> None:
+        target_id, emoji, device_id = obj.get("target_id"), obj.get("emoji"), obj.get("from")
+        if not target_id or not emoji or not device_id or target_id not in self._message_meta:
+            return  # unknown/expired message (e.g. from before this window opened) — nothing to anchor it to
+        by_emoji = self._reactions.setdefault(target_id, {}).setdefault(emoji, {})
+        if obj.get("op") == "remove":
+            by_emoji.pop(device_id, None)
+            if not by_emoji:
+                self._reactions[target_id].pop(emoji, None)
+        else:
+            by_emoji[device_id] = obj.get("nick", "?")
+        self._render_reactions(target_id)
 
     def _handle_presence(self, device_id: str, data) -> None:
         changed, previous = self.peers.update(device_id, data)
@@ -707,6 +840,75 @@ class RelayWindow(Adw.ApplicationWindow):
         self.client.send_chat(
             {"id": uuid.uuid4().hex, "ts": time.time(), "from": self.cfg.device_id, "nick": self.cfg.nickname, "text": text}
         )
+
+    def _build_react_button(self, msg_id: str) -> Gtk.MenuButton:
+        picks = Gtk.Box(spacing=2, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+        for emoji in _QUICK_REACTIONS:
+            pick_btn = Gtk.Button(label=emoji, css_classes=["flat", "reaction-pick"])
+            pick_btn.connect("clicked", self._on_quick_react, msg_id)
+            picks.append(pick_btn)
+        popover = Gtk.Popover(css_classes=["reaction-popover"], child=picks)
+        return Gtk.MenuButton(
+            icon_name="face-smile-symbolic",
+            tooltip_text="React",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular", "react-btn"],
+            popover=popover,
+        )
+
+    def _on_quick_react(self, button: Gtk.Button, msg_id: str) -> None:
+        button.get_ancestor(Gtk.Popover).popdown()
+        self._toggle_reaction(msg_id, button.get_label())
+
+    def _toggle_reaction(self, msg_id: str, emoji: str) -> None:
+        meta = self._message_meta.get(msg_id)
+        if meta is None:
+            return
+        already_mine = self.cfg.device_id in self._reactions.get(msg_id, {}).get(emoji, {})
+        payload = {
+            "type": "reaction",
+            "id": uuid.uuid4().hex,
+            "ts": time.time(),
+            "from": self.cfg.device_id,
+            "nick": self.cfg.nickname,
+            "target_id": msg_id,
+            "emoji": emoji,
+            "op": "remove" if already_mine else "add",
+        }
+        if meta["is_dm"]:
+            self.client.send_dm(meta["peer_device_id"], payload)
+            # DMs aren't echoed back to the sender the way broadcasts are —
+            # reflect our own reaction locally instead of waiting for one.
+            self._handle_reaction(payload)
+        else:
+            self.client.send_chat(payload)
+
+    def _render_reactions(self, msg_id: str) -> None:
+        box = self._reaction_slots.get(msg_id)
+        if box is None:
+            return
+        child = box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            box.remove(child)
+            child = nxt
+        for emoji, by_device in self._reactions.get(msg_id, {}).items():
+            if not by_device:
+                continue
+            pill = Gtk.Button(
+                css_classes=["reaction-pill"] + (["mine"] if self.cfg.device_id in by_device else []),
+                valign=Gtk.Align.CENTER,
+                tooltip_text=", ".join(sorted(by_device.values())),
+                child=Gtk.Label(label=f"{emoji} {len(by_device)}"),
+            )
+            pill.connect("clicked", lambda _b, e=emoji: self._toggle_reaction(msg_id, e))
+            box.append(pill)
+
+    def _on_emoji_picked(self, _chooser: Gtk.EmojiChooser, emoji: str) -> None:
+        pos = self.entry.get_position()
+        self.entry.get_buffer().insert_text(pos, emoji, -1)
+        self.entry.set_position(pos + len(emoji))
+        self.entry.grab_focus()
 
     def _on_attach(self, _widget) -> None:
         dialog = Gtk.FileDialog()
