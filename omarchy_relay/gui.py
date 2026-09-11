@@ -9,10 +9,14 @@ update is marshalled onto GTK's main loop via GLib.idle_add.
 from __future__ import annotations
 
 import dataclasses
+import os
+import re
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +24,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+gi.require_version("Pango", "1.0")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from .chat import _ding, _notify
 from .config import Config
@@ -31,201 +36,386 @@ from .transfer import FileReceiver, send_file
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _CLIPBOARD_IMAGE_MIME_TYPES = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/tiff", "image/webp")
 
-# WhatsApp-inspired palette: teal header/accent, mint bubble for our own
-# messages, white bubble for everyone else's, on the classic warm-beige
-# chat wallpaper.
-_WHATSAPP_CSS = """
-headerbar.whatsapp-header {
-  background: #075E54;
-  color: #ffffff;
-}
-headerbar.whatsapp-header windowtitle > label.title {
-  color: #ffffff;
-}
-headerbar.whatsapp-header windowtitle > label.subtitle {
-  color: rgba(255, 255, 255, 0.75);
-}
-headerbar.whatsapp-header button {
-  color: #ffffff;
+# Consecutive messages from the same sender within this many seconds render
+# as one group: a single avatar and name, tighter spacing, joined corners.
+_GROUP_WINDOW_SECONDS = 5 * 60
+_IMAGE_MAX_WIDTH = 320
+_IMAGE_MAX_HEIGHT = 260
+_NICK_COLORS = 6
+_CONTENT_MAX_WIDTH = 860
+
+# Every color here is one of libadwaita's own CSS variables, so the window
+# follows light/dark mode out of the box; _omarchy_theme_css() then points
+# those variables at the active Omarchy theme's palette when there is one.
+_BASE_CSS = """
+:root {
+  --relay-nick-0: var(--accent-blue);
+  --relay-nick-1: var(--accent-green);
+  --relay-nick-2: var(--accent-orange);
+  --relay-nick-3: var(--accent-purple);
+  --relay-nick-4: var(--accent-teal);
+  --relay-nick-5: var(--accent-pink);
 }
 
-list.whatsapp-chat-bg {
-  background-color: #E5DDD5;
+.relay-chat {
+  background-color: var(--view-bg-color);
 }
 
-box.whatsapp-system-pill {
-  background-color: rgba(255, 255, 255, 0.9);
-  border-radius: 8px;
-  padding: 3px 10px;
-}
-
-box.bubble-mine {
-  background-color: #DCF8C6;
-  border-radius: 12px;
-  padding: 6px 10px;
-}
-box.bubble-theirs {
-  background-color: #ffffff;
-  border-radius: 12px;
-  padding: 6px 10px;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.15);
-}
-label.bubble-sender {
-  color: #075E54;
-}
-label.bubble-text {
-  color: #111b21;
-}
-label.bubble-stamp {
-  color: rgba(17, 27, 33, 0.6);
-}
-label.whatsapp-system-text {
-  color: rgba(17, 27, 33, 0.75);
-}
-
-box.whatsapp-composer {
-  background-color: #F0F0F0;
-  padding: 8px;
-}
-entry.whatsapp-entry {
-  background-color: #ffffff;
-  color: #111b21;
+.bubble {
   border-radius: 18px;
-  padding: 8px 14px;
-  border: 1px solid #d9d9d9;
-  box-shadow: none;
-  outline: none;
+  padding: 7px 12px;
 }
-entry.whatsapp-entry:focus,
-entry.whatsapp-entry:focus-within {
-  border: 1px solid #25D366;
-  box-shadow: none;
-  outline: none;
+.bubble.theirs {
+  background-color: color-mix(in srgb, var(--card-bg-color), var(--card-fg-color) 6%);
+  color: var(--card-fg-color);
+  box-shadow: 0 1px 2px var(--card-shade-color);
 }
-entry.whatsapp-entry text {
-  color: #111b21;
+.bubble.mine {
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
 }
-entry.whatsapp-entry text selection {
-  background-color: #25D366;
-  color: #ffffff;
+.bubble.dm {
+  box-shadow: inset 0 0 0 1px var(--accent-color), 0 1px 2px var(--card-shade-color);
 }
-button.whatsapp-send-btn {
-  background-color: #25D366;
-  color: #ffffff;
-  border-radius: 9999px;
-  min-width: 34px;
-  min-height: 34px;
+.bubble.media {
   padding: 0;
 }
-button.whatsapp-attach-btn {
-  color: #54656F;
-  background: transparent;
+.bubble.theirs.joined-above { border-top-left-radius: 6px; }
+.bubble.theirs.joined-below { border-bottom-left-radius: 6px; }
+.bubble.mine.joined-above { border-top-right-radius: 6px; }
+.bubble.mine.joined-below { border-bottom-right-radius: 6px; }
+.bubble .stamp {
+  opacity: 0.65;
 }
 
-list.whatsapp-sidebar {
-  background-color: #ffffff;
+.nick-0 { color: oklab(from var(--relay-nick-0) var(--standalone-color-oklab)); }
+.nick-1 { color: oklab(from var(--relay-nick-1) var(--standalone-color-oklab)); }
+.nick-2 { color: oklab(from var(--relay-nick-2) var(--standalone-color-oklab)); }
+.nick-3 { color: oklab(from var(--relay-nick-3) var(--standalone-color-oklab)); }
+.nick-4 { color: oklab(from var(--relay-nick-4) var(--standalone-color-oklab)); }
+.nick-5 { color: oklab(from var(--relay-nick-5) var(--standalone-color-oklab)); }
+.dm-tag {
+  color: var(--accent-color);
 }
-list.whatsapp-sidebar row {
-  border-bottom: 1px solid #ededed;
+
+.file-icon {
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 12px;
+  background-color: color-mix(in srgb, var(--accent-bg-color) 20%, transparent);
+  color: var(--accent-color);
+}
+.bubble.mine .file-icon {
+  background-color: rgba(0, 0, 0, 0.15);
+  color: inherit;
+}
+
+.composer {
+  padding: 4px 12px 12px 12px;
+}
+.composer-field {
+  background-color: color-mix(in srgb, var(--card-bg-color), var(--card-fg-color) 6%);
+  border-radius: 9999px;
+  padding: 3px;
+  box-shadow: 0 1px 2px var(--card-shade-color);
+}
+.composer-field > entry,
+.composer-field > entry:focus-within {
+  background: none;
+  box-shadow: none;
+  outline: none;
+  min-height: 34px;
+}
+button.send-button {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+}
+
+.sidebar-heading {
+  margin: 6px 18px 2px 18px;
+}
+.presence-dot {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 9999px;
+  background-color: var(--success-bg-color);
+  box-shadow: 0 0 0 2px var(--sidebar-bg-color);
+}
+.profile {
+  padding: 8px 10px;
 }
 """
 
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?")
 
-def _fmt_ts(ts: float) -> str:
-    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+def _omarchy_state_dir() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "omarchy" / "current"
+
+
+def _omarchy_theme_colors() -> dict[str, str]:
+    """The active Omarchy theme's colors.toml, or {} when not on Omarchy."""
+    state_dir = _omarchy_state_dir()
+    candidates = [state_dir / "theme" / "colors.toml"]
+    try:
+        name = (state_dir / "theme.name").read_text().strip()
+    except OSError:
+        name = ""
+    if name:
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        candidates.append(config_home / "omarchy" / "themes" / name / "colors.toml")
+        candidates.append(Path("/usr/share/omarchy/themes") / name / "colors.toml")
+    for path in candidates:
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        return {key: value for key, value in data.items() if isinstance(value, str)}
+    return {}
+
+
+def _readable_on(hex_color: str) -> str:
+    r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return "rgba(0, 0, 0, 0.87)" if luminance > 0.5 else "#ffffff"
+
+
+def _omarchy_theme_css(colors: dict[str, str], dark: bool) -> str:
+    """Maps an Omarchy palette onto libadwaita's color variables. Empty when
+    there's no usable theme, or its mode disagrees with the current
+    light/dark style — stock libadwaita colors are used as-is then."""
+
+    def color(key: str) -> Optional[str]:
+        value = colors.get(key, "")
+        return value if _HEX_COLOR.fullmatch(value) else None
+
+    background, foreground, accent = color("background"), color("foreground"), color("accent")
+    if not (background and foreground and accent):
+        return ""
+    if colors.get("mode") in ("dark", "light") and (colors["mode"] == "dark") != dark:
+        return ""
+    sidebar = color("dark_background") or background
+    raised = color("lighter_background") or background
+    variables = {
+        "--window-bg-color": background,
+        "--window-fg-color": foreground,
+        "--view-bg-color": background,
+        "--view-fg-color": foreground,
+        "--headerbar-bg-color": background,
+        "--headerbar-fg-color": foreground,
+        "--headerbar-backdrop-color": background,
+        "--sidebar-bg-color": sidebar,
+        "--sidebar-fg-color": foreground,
+        "--sidebar-backdrop-color": sidebar,
+        "--card-bg-color": raised,
+        "--card-fg-color": foreground,
+        "--dialog-bg-color": sidebar,
+        "--dialog-fg-color": foreground,
+        "--popover-bg-color": raised,
+        "--popover-fg-color": foreground,
+        "--accent-bg-color": accent,
+        "--accent-fg-color": _readable_on(accent),
+    }
+    for role, key in (("success", "green"), ("warning", "yellow"), ("error", "red"), ("destructive", "red")):
+        value = color(key)
+        if value:
+            variables[f"--{role}-bg-color"] = value
+            variables[f"--{role}-fg-color"] = _readable_on(value)
+    for index, key in enumerate(("blue", "green", "orange", "magenta", "cyan", "red")):
+        value = color(key)
+        if value:
+            variables[f"--relay-nick-{index}"] = value
+    body = "\n".join(f"  {name}: {value};" for name, value in variables.items())
+    return f":root {{\n{body}\n}}\n"
+
+
+def _fmt_time(ts: float) -> str:
+    return time.strftime("%H:%M", time.localtime(ts))
+
+
+def _fmt_full_time(ts: float) -> str:
+    return time.strftime("%A %-d %B %Y, %H:%M:%S", time.localtime(ts))
+
+
+def _nick_color_class(nick: str) -> str:
+    return f"nick-{zlib.crc32(nick.encode()) % _NICK_COLORS}"
 
 
 class RelayWindow(Adw.ApplicationWindow):
     def __init__(self, app: "RelayApp", cfg: Config):
-        super().__init__(application=app)
+        super().__init__(application=app, title="Omarchy Relay")
         self.cfg = cfg
         self.peers = PeerDirectory()
-        self.set_default_size(780, 540)
+        self.set_default_size(900, 640)
+        self.set_size_request(360, 420)
 
         self.client = RelayClient(cfg)
         self.receiver = FileReceiver(cfg, on_complete=self._on_file_complete, on_error=self._on_file_error)
 
-        self._install_whatsapp_theme()
+        self._connection_state = "connecting"
+        # Message grouping: whose bubble came last, when, and the bubble
+        # itself (its bottom corner joins onto the next one in the group).
+        self._group_key: Optional[tuple] = None
+        self._group_ts = 0.0
+        self._group_bubble: Optional[Gtk.Widget] = None
+        self._last_row_was_system = False
+        self._stick_to_bottom = True
+        self._scroll_pending = False
+        self._chat_extent = (0.0, 0.0)  # (upper, page_size) as of the last layout change
 
-        toolbar_view = Adw.ToolbarView()
-        header = Adw.HeaderBar()
-        header.add_css_class("whatsapp-header")
-        self.title_widget = Adw.WindowTitle(title=f"Omarchy Relay — {cfg.nickname}", subtitle=f"{cfg.network_name} · connecting…")
-        header.set_title_widget(self.title_widget)
-        settings_btn = Gtk.Button(icon_name="preferences-system-symbolic", tooltip_text="Settings")
-        settings_btn.connect("clicked", self._on_open_settings)
-        header.pack_end(settings_btn)
-        toolbar_view.add_top_bar(header)
+        self._install_theme()
 
-        split = Adw.NavigationSplitView()
-        split.set_min_sidebar_width(160)
-        split.set_max_sidebar_width(240)
+        split = Adw.NavigationSplitView(min_sidebar_width=220, max_sidebar_width=280, show_content=True)
+        split.set_sidebar(self._build_sidebar())
+        split.set_content(self._build_content())
 
-        sidebar_page = Adw.NavigationPage(title="Online")
-        sidebar_scroller = Gtk.ScrolledWindow(vexpand=True)
-        self.peer_list = Gtk.ListBox()
-        self.peer_list.add_css_class("navigation-sidebar")
-        self.peer_list.add_css_class("whatsapp-sidebar")
-        self.peer_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        sidebar_scroller.set_child(self.peer_list)
-        sidebar_page.set_child(sidebar_scroller)
-        split.set_sidebar(sidebar_page)
+        narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 560sp"))
+        narrow.add_setter(split, "collapsed", True)
+        self.add_breakpoint(narrow)
 
-        content_page = Adw.NavigationPage(title=cfg.network_name)
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
-        self.chat_scroller = Gtk.ScrolledWindow(vexpand=True)
-        self.chat_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.chat_list = Gtk.ListBox()
-        self.chat_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.chat_list.add_css_class("whatsapp-chat-bg")
-        self.chat_scroller.set_child(self.chat_list)
-        content_box.append(self.chat_scroller)
-
-        entry_row = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=6,
-        )
-        entry_row.add_css_class("whatsapp-composer")
-        self.entry = Gtk.Entry(hexpand=True, placeholder_text="Message… (paste an image to send it)")
-        self.entry.add_css_class("whatsapp-entry")
-        self.entry.connect("activate", self._on_send)
-        paste_controller = Gtk.EventControllerKey()
-        paste_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        paste_controller.connect("key-pressed", self._on_entry_key_pressed)
-        self.entry.add_controller(paste_controller)
-        attach_btn = Gtk.Button(icon_name="mail-attachment-symbolic", tooltip_text="Send a file")
-        attach_btn.add_css_class("whatsapp-attach-btn")
-        attach_btn.add_css_class("flat")
-        attach_btn.connect("clicked", self._on_attach)
-        send_btn = Gtk.Button(icon_name="mail-send-symbolic", tooltip_text="Send")
-        send_btn.add_css_class("whatsapp-send-btn")
-        send_btn.connect("clicked", self._on_send)
-        entry_row.append(self.entry)
-        entry_row.append(attach_btn)
-        entry_row.append(send_btn)
-        content_box.append(entry_row)
-
-        content_page.set_child(content_box)
-        split.set_content(content_page)
-
-        toolbar_view.set_content(split)
-
-        self.toast_overlay = Adw.ToastOverlay()
-        self.toast_overlay.set_child(toolbar_view)
+        self.toast_overlay = Adw.ToastOverlay(child=split)
         self.set_content(self.toast_overlay)
+        self.set_focus(self.entry)
+        self._update_status()
 
         self._wire_client_callbacks()
 
         self.connect("close-request", self._on_close_request)
         threading.Thread(target=self._connect_worker, daemon=True).start()
 
-    def _install_whatsapp_theme(self) -> None:
-        provider = Gtk.CssProvider()
-        provider.load_from_string(_WHATSAPP_CSS)
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    # -- layout --------------------------------------------------------------
+
+    def _build_sidebar(self) -> Adw.NavigationPage:
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title="Omarchy Relay"))
+
+        self.online_heading = Gtk.Label(xalign=0, css_classes=["caption-heading", "dim-label", "sidebar-heading"])
+        self.peer_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["navigation-sidebar"])
+        self.peer_list.set_placeholder(
+            Gtk.Label(label="Nobody else is online", wrap=True, margin_top=12, margin_bottom=12, css_classes=["dim-label"])
         )
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(self.online_heading)
+        body.append(self.peer_list)
+        scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=body)
+
+        # Who you are on this network, pinned to the bottom of the sidebar.
+        self.profile_avatar = Adw.Avatar(size=36, text=self.cfg.nickname, show_initials=True)
+        self.profile_name = Gtk.Label(
+            label=self.cfg.nickname, xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["heading"]
+        )
+        self.profile_status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["caption", "dim-label"])
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        labels.append(self.profile_name)
+        labels.append(self.profile_status)
+        settings_btn = Gtk.Button(
+            icon_name="preferences-system-symbolic",
+            tooltip_text="Settings",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular"],
+        )
+        settings_btn.connect("clicked", self._on_open_settings)
+        profile = Gtk.Box(spacing=10, css_classes=["profile"])
+        profile.append(self.profile_avatar)
+        profile.append(labels)
+        profile.append(settings_btn)
+
+        view = Adw.ToolbarView(content=scroller)
+        view.add_top_bar(header)
+        view.add_bottom_bar(profile)
+        return Adw.NavigationPage(title="Online", child=view)
+
+    def _build_content(self) -> Adw.NavigationPage:
+        header = Adw.HeaderBar()
+        self.title_widget = Adw.WindowTitle(title=self.cfg.network_name)
+        header.set_title_widget(self.title_widget)
+
+        self.banner = Adw.Banner(title="Couldn't reach the broker", button_label="Settings")
+        self.banner.connect("button-clicked", self._on_open_settings)
+
+        empty_page = Adw.StatusPage(
+            icon_name="user-available-symbolic",
+            title="No messages yet",
+            description="Messages on this network show up here.\nPaste an image or attach a file to share it.",
+        )
+        self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=8, margin_bottom=8)
+        clamp = Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=self.chat_box)
+        self.chat_scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
+        adjustment = self.chat_scroller.get_vadjustment()
+        adjustment.connect("changed", self._on_chat_resized)
+        adjustment.connect("notify::upper", lambda adj, _pspec: self._on_chat_resized(adj))
+        adjustment.connect("notify::page-size", lambda adj, _pspec: self._on_chat_resized(adj))
+        adjustment.connect("value-changed", self._on_chat_scrolled)
+
+        self.chat_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.chat_stack.add_named(empty_page, "empty")
+        self.chat_stack.add_named(self.chat_scroller, "chat")
+
+        view = Adw.ToolbarView(content=self.chat_stack, css_classes=["relay-chat"])
+        view.add_top_bar(header)
+        view.add_top_bar(self.banner)
+        view.add_bottom_bar(self._build_composer())
+        self.content_page = Adw.NavigationPage(title=self.cfg.network_name, child=view)
+        return self.content_page
+
+    def _build_composer(self) -> Gtk.Widget:
+        attach_btn = Gtk.Button(
+            icon_name="mail-attachment-symbolic",
+            tooltip_text="Send a file",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular"],
+        )
+        attach_btn.connect("clicked", self._on_attach)
+        self.entry = Gtk.Entry(hexpand=True, placeholder_text=self._composer_placeholder())
+        self.entry.connect("activate", self._on_send)
+        self.entry.connect("changed", self._on_entry_changed)
+        paste_controller = Gtk.EventControllerKey()
+        paste_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        paste_controller.connect("key-pressed", self._on_entry_key_pressed)
+        self.entry.add_controller(paste_controller)
+        field = Gtk.Box(spacing=2, hexpand=True, css_classes=["composer-field"])
+        field.append(attach_btn)
+        field.append(self.entry)
+
+        self.send_btn = Gtk.Button(
+            icon_name="mail-send-symbolic",
+            tooltip_text="Send",
+            valign=Gtk.Align.CENTER,
+            sensitive=False,
+            css_classes=["circular", "suggested-action", "send-button"],
+        )
+        self.send_btn.connect("clicked", self._on_send)
+
+        composer = Gtk.Box(spacing=8, css_classes=["composer"])
+        composer.append(field)
+        composer.append(self.send_btn)
+        return Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, tightening_threshold=600, child=composer)
+
+    def _composer_placeholder(self) -> str:
+        return f"Message {self.cfg.network_name}"
+
+    def _install_theme(self) -> None:
+        self._css_provider = Gtk.CssProvider()
+        self._reload_theme()
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), self._css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        Adw.StyleManager.get_default().connect("notify::dark", lambda *_: self._reload_theme())
+        # Omarchy rewrites its current-theme state on every theme switch, so
+        # watching it restyles an open window along with the rest of the desktop.
+        try:
+            self._theme_monitor = Gio.File.new_for_path(str(_omarchy_state_dir())).monitor_directory(
+                Gio.FileMonitorFlags.NONE, None
+            )
+            self._theme_monitor.connect("changed", lambda *_: self._reload_theme())
+        except GLib.Error:
+            self._theme_monitor = None
+
+    def _reload_theme(self) -> None:
+        dark = Adw.StyleManager.get_default().get_dark()
+        self._css_provider.load_from_string(_BASE_CSS + _omarchy_theme_css(_omarchy_theme_colors(), dark))
 
     def _wire_client_callbacks(self) -> None:
         self.client.on_chat = self._threaded(self._handle_chat)
@@ -252,131 +442,223 @@ class RelayWindow(Adw.ApplicationWindow):
             self.client.connect()
             GLib.idle_add(self._on_connected)
         except ConnectionError as exc:
-            GLib.idle_add(self._append_system, f"connection failed: {exc}")
+            GLib.idle_add(self._on_connect_failed, str(exc))
 
     def _on_connected(self) -> None:
-        self.title_widget.set_subtitle(f"{self.cfg.network_name} · connected")
+        self._connection_state = "connected"
+        self.banner.set_revealed(False)
+        self._update_status()
+
+    def _on_connect_failed(self, reason: str) -> None:
+        self._connection_state = "failed"
+        self.banner.set_revealed(True)
+        self._update_status()
+        self._append_system(f"Connection failed: {reason}")
+
+    def _update_status(self) -> None:
+        others = sum(1 for device_id in self.peers.snapshot() if device_id != self.cfg.device_id)
+        state = {"connecting": "Connecting…", "connected": "Connected", "failed": "Not connected"}[self._connection_state]
+        self.title_widget.set_subtitle(f"{others} online" if self._connection_state == "connected" else state)
+        self.profile_status.set_label(state)
+        self.online_heading.set_label(f"Online — {others}")
 
     # -- rendering -----------------------------------------------------------
 
+    def _on_chat_resized(self, adjustment: Gtk.Adjustment) -> None:
+        self._chat_extent = (adjustment.get_upper(), adjustment.get_page_size())
+        # This fires mid-layout, where a scroll's own re-layout request gets
+        # dropped (the scrollbar moves but the content doesn't). Scroll once
+        # layout has finished instead.
+        if self._stick_to_bottom and not self._scroll_pending:
+            self._scroll_pending = True
+            GLib.idle_add(self._scroll_to_bottom)
+
     def _scroll_to_bottom(self) -> bool:
-        adj = self.chat_scroller.get_vadjustment()
-        adj.set_value(adj.get_upper() - adj.get_page_size())
+        self._scroll_pending = False
+        if self._stick_to_bottom:
+            adjustment = self.chat_scroller.get_vadjustment()
+            adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
         return False
 
-    def _append_row(self, widget: Gtk.Widget) -> None:
-        row = Gtk.ListBoxRow(activatable=False, selectable=False)
-        row.set_child(widget)
-        self.chat_list.append(row)
-        GLib.idle_add(self._scroll_to_bottom)
+    def _on_chat_scrolled(self, adjustment: Gtk.Adjustment) -> None:
+        # Only follow new messages while the reader is already at the bottom —
+        # scrolling up to reread something shouldn't get yanked back down.
+        # GTK can report a value change from the content growing before it
+        # reports the growth itself; that isn't the reader scrolling.
+        if (adjustment.get_upper(), adjustment.get_page_size()) != self._chat_extent:
+            return
+        self._stick_to_bottom = adjustment.get_value() >= adjustment.get_upper() - adjustment.get_page_size() - 48
 
-    def _bubble(self, is_mine: bool) -> tuple[Gtk.Box, Gtk.Box]:
-        """A left/right-aligned outer wrapper plus the bubble box inside it."""
-        outer = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            halign=Gtk.Align.END if is_mine else Gtk.Align.START,
-            margin_start=12,
-            margin_end=12,
-            margin_top=3,
-            margin_bottom=3,
+    def _append_row(self, widget: Gtk.Widget, follow: bool = False) -> None:
+        if follow:
+            self._stick_to_bottom = True
+        self._last_row_was_system = False
+        self.chat_box.append(widget)
+        self.chat_stack.set_visible_child_name("chat")
+
+    def _stamp(self, ts: float) -> Gtk.Label:
+        return Gtk.Label(label=_fmt_time(ts), tooltip_text=_fmt_full_time(ts), css_classes=["caption", "stamp"])
+
+    def _append_bubble(self, bubble: Gtk.Widget, *, nick: str, ts: float, is_mine: bool, is_dm: bool = False) -> None:
+        """Places a bubble on its side of the chat, folding it into the
+        previous message's group when it's the same sender shortly after."""
+        key = ("mine",) if is_mine else ("theirs", nick, is_dm)
+        joined = key == self._group_key and ts - self._group_ts <= _GROUP_WINDOW_SECONDS
+        bubble.add_css_class("mine" if is_mine else "theirs")
+        if is_dm:
+            bubble.add_css_class("dm")
+        if joined:
+            bubble.add_css_class("joined-above")
+            self._group_bubble.add_css_class("joined-below")
+        self._group_key, self._group_ts, self._group_bubble = key, ts, bubble
+
+        row = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=2 if joined else 10)
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        if is_mine:
+            row.set_halign(Gtk.Align.END)
+            row.set_margin_start(72)
+        else:
+            row.set_halign(Gtk.Align.START)
+            row.set_margin_end(72)
+            if joined:
+                row.append(Gtk.Box(width_request=32))  # keeps the bubble under the group's avatar
+            else:
+                row.append(Adw.Avatar(size=32, text=nick, show_initials=True, valign=Gtk.Align.START))
+                sender = Gtk.Box(spacing=6)
+                sender.append(Gtk.Label(label=nick, xalign=0, css_classes=["caption-heading", _nick_color_class(nick)]))
+                if is_dm:
+                    sender.append(Gtk.Label(label="Direct message", css_classes=["caption", "dm-tag"]))
+                column.append(sender)
+        column.append(bubble)
+        row.append(column)
+        self._append_row(row, follow=is_mine)
+
+    def _append_text(self, nick: str, ts: float, text: str, is_mine: bool = False, is_dm: bool = False) -> None:
+        body = Gtk.Label(
+            label=text,
+            xalign=0,
+            wrap=True,
+            wrap_mode=Pango.WrapMode.WORD_CHAR,
+            # Without this a WORD_CHAR label asks for its narrowest wrap as
+            # its natural width, leaving short lines inside a wide bubble.
+            natural_wrap_mode=Gtk.NaturalWrapMode.NONE,
+            hexpand=True,
+            selectable=True,
+            max_width_chars=52,
         )
-        bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        bubble.add_css_class("bubble-mine" if is_mine else "bubble-theirs")
-        outer.append(bubble)
-        return outer, bubble
-
-    def _append_message(self, header_text: str, ts: float, text: str, is_mine: bool = False) -> None:
-        outer, bubble = self._bubble(is_mine)
-        if not is_mine:
-            sender = Gtk.Label(xalign=0)
-            sender.add_css_class("bubble-sender")
-            sender.set_markup(f"<b>{GLib.markup_escape_text(header_text)}</b>")
-            bubble.append(sender)
-        body = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        body.add_css_class("bubble-text")
-        body.set_max_width_chars(42)
-        body.set_text(text)
+        stamp = self._stamp(ts)
+        stamp.set_valign(Gtk.Align.END)
+        bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
         bubble.append(body)
-        stamp = Gtk.Label(xalign=1)
-        stamp.add_css_class("bubble-stamp")
-        stamp.set_markup(f"<span size='small'>{_fmt_ts(ts)}</span>")
         bubble.append(stamp)
-        self._append_row(outer)
+        self._append_bubble(bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm)
 
     def _append_system(self, text: str) -> None:
-        label = Gtk.Label(xalign=0.5)
-        label.add_css_class("whatsapp-system-text")
-        label.set_markup(f"<span size='small'>{GLib.markup_escape_text(text)}</span>")
-        pill = Gtk.Box(halign=Gtk.Align.CENTER, margin_top=6, margin_bottom=6)
-        pill.add_css_class("whatsapp-system-pill")
-        pill.append(label)
-        self._append_row(pill)
+        label = Gtk.Label(
+            label=text,
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+            margin_top=2 if self._last_row_was_system else 12,
+            margin_bottom=4,
+            margin_start=24,
+            margin_end=24,
+            css_classes=["caption", "dim-label"],
+        )
+        self._group_key = None
+        self._append_row(label)
+        self._last_row_was_system = True
 
     def _append_file_received(self, meta: dict, path: Path) -> None:
-        is_mine = meta.get("nick") == self.cfg.nickname
-        outer, bubble = self._bubble(is_mine)
-        if not is_mine:
-            sender = Gtk.Label(xalign=0)
-            sender.add_css_class("bubble-sender")
-            sender.set_markup(f"<b>{GLib.markup_escape_text(meta['nick'])}</b>")
-            bubble.append(sender)
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        label = Gtk.Label(xalign=0, wrap=True)
-        label.add_css_class("bubble-text")
-        label.set_markup(f"📎 {GLib.markup_escape_text(meta['filename'])}")
-        open_btn = Gtk.Button(label="Open Folder")
+        now = time.time()
+        icon = Gtk.Image(icon_name="text-x-generic-symbolic", pixel_size=20, css_classes=["file-icon"])
+        name = Gtk.Label(
+            label=meta["filename"],
+            xalign=0,
+            ellipsize=Pango.EllipsizeMode.MIDDLE,
+            max_width_chars=32,
+            css_classes=["heading"],
+        )
+        details = [GLib.format_size(meta["size"])] if meta.get("size") is not None else []
+        details.append(_fmt_time(now))
+        info_line = Gtk.Label(label=" · ".join(details), xalign=0, css_classes=["caption", "stamp"])
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        info.append(name)
+        info.append(info_line)
+        open_btn = Gtk.Button(
+            icon_name="folder-open-symbolic",
+            tooltip_text="Show in folder",
+            valign=Gtk.Align.CENTER,
+            css_classes=["flat", "circular"],
+        )
         open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
-        row.append(label)
-        row.append(open_btn)
-        bubble.append(row)
-        self._append_row(outer)
+        bubble = Gtk.Box(spacing=10, css_classes=["bubble"])
+        bubble.append(icon)
+        bubble.append(info)
+        bubble.append(open_btn)
+        self._append_bubble(bubble, nick=meta["nick"], ts=now, is_mine=meta.get("nick") == self.cfg.nickname)
 
     def _open_containing_folder(self, path: Path) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).open_containing_folder(self, None, None)
 
     def _append_image(self, nick: str, path: Path) -> None:
         is_mine = nick == self.cfg.nickname
-        outer, bubble = self._bubble(is_mine)
+        try:
+            texture = Gdk.Texture.new_from_filename(str(path))
+        except GLib.Error:
+            self._append_file_received({"nick": nick, "filename": path.name}, path)
+            return
+        scale = min(1.0, _IMAGE_MAX_WIDTH / texture.get_width(), _IMAGE_MAX_HEIGHT / texture.get_height())
+        picture = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True)
+        picture.set_size_request(max(1, round(texture.get_width() * scale)), max(1, round(texture.get_height() * scale)))
+        bubble = Gtk.Overlay(child=picture, overflow=Gtk.Overflow.HIDDEN, css_classes=["bubble", "media"])
+        # Our own images are pasted from a temp file that's gone moments
+        # later, so there's no folder worth opening for those.
         if not is_mine:
-            caption = Gtk.Label(xalign=0)
-            caption.add_css_class("bubble-sender")
-            caption.set_markup(f"<b>{GLib.markup_escape_text(nick)}</b>")
-            bubble.append(caption)
-        picture = Gtk.Picture.new_for_filename(str(path))
-        picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        picture.set_halign(Gtk.Align.START)
-        picture.set_size_request(-1, 240)  # cap the thumbnail height; width follows aspect ratio
-        picture.set_can_shrink(True)
-        open_btn = Gtk.Button(label="Open Folder", halign=Gtk.Align.START)
-        open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
-        bubble.append(picture)
-        bubble.append(open_btn)
-        self._append_row(outer)
+            open_btn = Gtk.Button(
+                icon_name="folder-open-symbolic",
+                tooltip_text="Show in folder",
+                halign=Gtk.Align.END,
+                valign=Gtk.Align.END,
+                margin_end=8,
+                margin_bottom=8,
+                css_classes=["osd", "circular"],
+            )
+            open_btn.connect("clicked", lambda _b: self._open_containing_folder(path))
+            bubble.add_overlay(open_btn)
+        self._append_bubble(bubble, nick=nick, ts=time.time(), is_mine=is_mine)
 
     def _refresh_peer_list(self) -> None:
         self.peer_list.remove_all()
-        for _device_id, data in sorted(self.peers.snapshot().items(), key=lambda kv: kv[1].get("nick", "")):
-            row = Gtk.Box(
-                orientation=Gtk.Orientation.HORIZONTAL,
-                spacing=8,
-                margin_start=10,
-                margin_end=10,
-                margin_top=6,
-                margin_bottom=6,
+        peers = sorted(
+            self.peers.snapshot().items(),
+            key=lambda kv: (kv[0] != self.cfg.device_id, kv[1].get("nick", "").lower()),
+        )
+        for device_id, data in peers:
+            nick = data.get("nick", "?")
+            avatar = Gtk.Overlay(child=Adw.Avatar(size=32, text=nick, show_initials=True), valign=Gtk.Align.CENTER)
+            avatar.add_overlay(Gtk.Box(halign=Gtk.Align.END, valign=Gtk.Align.END, css_classes=["presence-dot"]))
+            name = Gtk.Label(
+                label=f"{nick} (you)" if device_id == self.cfg.device_id else nick,
+                xalign=0,
+                ellipsize=Pango.EllipsizeMode.END,
             )
-            dot = Gtk.Image.new_from_icon_name("user-available-symbolic")
-            dot.add_css_class("success")
-            label = Gtk.Label(label=data.get("nick", "?"), xalign=0)
-            label.add_css_class("bubble-text")
-            row.append(dot)
-            row.append(label)
-            self.peer_list.append(row)
+            device = Gtk.Label(
+                label=device_id, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["caption", "dim-label"]
+            )
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+            labels.append(name)
+            labels.append(device)
+            box = Gtk.Box(spacing=10, margin_top=3, margin_bottom=3)
+            box.append(avatar)
+            box.append(labels)
+            self.peer_list.append(Gtk.ListBoxRow(child=box, activatable=False, selectable=False))
+        self._update_status()
 
     # -- RelayClient callbacks (already marshalled onto the GTK thread) ----
 
     def _handle_chat(self, obj: dict) -> None:
         is_mine = obj.get("from") == self.cfg.device_id
-        self._append_message(obj["nick"], obj["ts"], obj["text"], is_mine=is_mine)
+        self._append_text(obj["nick"], obj["ts"], obj["text"], is_mine=is_mine)
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
@@ -384,7 +666,7 @@ class RelayWindow(Adw.ApplicationWindow):
             _ding()
 
     def _handle_dm(self, obj: dict) -> None:
-        self._append_message(f"DM from {obj['nick']}", obj["ts"], obj["text"])
+        self._append_text(obj["nick"], obj["ts"], obj["text"], is_dm=True)
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
 
@@ -410,9 +692,12 @@ class RelayWindow(Adw.ApplicationWindow):
         _ding()
 
     def _on_file_error(self, meta: dict, msg: str) -> None:
-        GLib.idle_add(self._append_system, f"file '{meta.get('filename', '?')}' failed: {msg}")
+        GLib.idle_add(self._append_system, f"Couldn't receive {meta.get('filename', 'a file')}: {msg}")
 
     # -- UI actions ----------------------------------------------------------
+
+    def _on_entry_changed(self, entry: Gtk.Entry) -> None:
+        self.send_btn.set_sensitive(bool(entry.get_text().strip()))
 
     def _on_send(self, _widget) -> None:
         text = self.entry.get_text().strip()
@@ -436,10 +721,10 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         path = Path(gfile.get_path())
         try:
-            transfer_id, total_chunks = send_file(self.client, self.cfg, path, to="*")
-            self._append_system(f"sending '{path.name}' ({total_chunks} chunks, transfer {transfer_id})")
+            send_file(self.client, self.cfg, path, to="*")
+            self._append_system(f"Sending {path.name}…")
         except (FileNotFoundError, ValueError) as exc:
-            self._append_system(f"! {exc}")
+            self._append_system(str(exc))
 
     def _on_entry_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
         is_paste = keyval == Gdk.KEY_v and bool(state & Gdk.ModifierType.CONTROL_MASK)
@@ -456,7 +741,7 @@ class RelayWindow(Adw.ApplicationWindow):
         try:
             texture = clipboard.read_texture_finish(result)
         except GLib.Error as exc:
-            self._append_system(f"clipboard paste failed: {exc}")
+            self._append_system(f"Couldn't paste the image: {exc}")
             return
         if texture is None:
             return
@@ -465,15 +750,15 @@ class RelayWindow(Adw.ApplicationWindow):
         try:
             send_file(self.client, self.cfg, tmp_path, to="*")
         except (FileNotFoundError, ValueError) as exc:
-            self._append_system(f"! {exc}")
+            self._append_system(str(exc))
             tmp_path.unlink(missing_ok=True)
             return
         # Our own broadcast files are deliberately not echoed back to us
         # (FileReceiver skips its own sender), so without this we'd never
         # see the image we just pasted in our own chat.
         self._append_image(self.cfg.nickname, tmp_path)
-        # Gtk.Picture decodes the file into a texture at construction time,
-        # so it's safe to clean up shortly after rather than keep it around.
+        # _append_image decodes the file into a texture up front, so it's
+        # safe to clean up shortly after rather than keep it around.
         GLib.timeout_add_seconds(5, lambda: tmp_path.unlink(missing_ok=True) or False)
 
     def _on_close_request(self, _window) -> bool:
@@ -483,17 +768,14 @@ class RelayWindow(Adw.ApplicationWindow):
     # -- settings --------------------------------------------------------
 
     def _on_open_settings(self, _widget) -> None:
-        win = Adw.Window(transient_for=self, modal=True)
-        win.set_default_size(440, 480)
-        win.set_title("Settings")
+        dialog = Adw.Dialog(title="Settings", content_width=460, content_height=640)
 
-        toolbar_view = Adw.ToolbarView()
-        header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title="Settings"))
-        save_btn = Gtk.Button(label="Save")
-        save_btn.add_css_class("suggested-action")
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _b: dialog.close())
+        save_btn = Gtk.Button(label="Save", css_classes=["suggested-action"])
+        header.pack_start(cancel_btn)
         header.pack_end(save_btn)
-        toolbar_view.add_top_bar(header)
 
         page = Adw.PreferencesPage()
 
@@ -540,8 +822,10 @@ class RelayWindow(Adw.ApplicationWindow):
         chat_group.add(presence_row)
         page.add(chat_group)
 
-        toolbar_view.set_content(page)
-        win.set_content(toolbar_view)
+        toasts = Adw.ToastOverlay(child=page)
+        toolbar_view = Adw.ToolbarView(content=toasts)
+        toolbar_view.add_top_bar(header)
+        dialog.set_child(toolbar_view)
 
         # Fields that require tearing down and reconnecting RelayClient —
         # toggling a display-only preference like show_presence shouldn't
@@ -572,10 +856,10 @@ class RelayWindow(Adw.ApplicationWindow):
                 show_presence=presence_row.get_active(),
             )
             if not new_cfg.broker_host or not new_cfg.network_name or not new_cfg.passphrase:
-                self.toast_overlay.add_toast(Adw.Toast(title="Host, network name, and passphrase are required"))
+                toasts.add_toast(Adw.Toast(title="Host, network name, and passphrase are required"))
                 return
             new_cfg.save()
-            win.close()
+            dialog.close()
             needs_reconnect = any(
                 getattr(new_cfg, field) != getattr(self.cfg, field) for field in _RECONNECT_FIELDS
             )
@@ -587,7 +871,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 self.toast_overlay.add_toast(Adw.Toast(title="Settings saved"))
 
         save_btn.connect("clicked", on_save)
-        win.present()
+        dialog.present(self)
 
     def _apply_new_config(self, new_cfg: Config) -> None:
         self.client.disconnect()
@@ -598,10 +882,15 @@ class RelayWindow(Adw.ApplicationWindow):
         self.client = RelayClient(new_cfg)
         self._wire_client_callbacks()
 
-        self.title_widget.set_title(f"Omarchy Relay — {new_cfg.nickname}")
-        self.title_widget.set_subtitle(f"{new_cfg.network_name} · connecting…")
+        self._connection_state = "connecting"
+        self.banner.set_revealed(False)
+        self.title_widget.set_title(new_cfg.network_name)
+        self.content_page.set_title(new_cfg.network_name)
+        self.profile_avatar.set_text(new_cfg.nickname)
+        self.profile_name.set_label(new_cfg.nickname)
+        self.entry.set_placeholder_text(self._composer_placeholder())
         self._refresh_peer_list()
-        self._append_system("settings updated, reconnecting…")
+        self._append_system("Settings updated — reconnecting…")
         self.toast_overlay.add_toast(Adw.Toast(title="Settings saved"))
 
         threading.Thread(target=self._connect_worker, daemon=True).start()
