@@ -98,15 +98,15 @@ cd ~/Projects/omarchy-relay
 
 This installs `python-paho-mqtt`, `python-cryptography`, `python-textual`,
 `python-gobject`, `gtk4`, `libadwaita`, `gstreamer`, `gst-plugins-base`,
-and `gst-plugin-pipewire` via `pacman`, copies the package to
+`gst-plugin-pipewire`, `grim`, and `slurp` via `pacman`, copies the package to
 `~/.local/share/omarchy-relay`, puts a launcher at
 `~/.local/bin/omarchy-relay`, and adds "Omarchy Relay" to your app
 launcher.
 
 On another distro: create a venv, `pip install paho-mqtt cryptography
 textual PyGObject`, install GTK4 + libadwaita + GStreamer (core,
-`gst-plugins-base`, and a PipeWire or ALSA source/sink plugin) through your
-package manager, and run `python3 -m omarchy_relay.cli` from inside the
+`gst-plugins-base`, and a PipeWire or ALSA source/sink plugin) plus `grim`
+and `slurp` through your package manager, and run `python3 -m omarchy_relay.cli` from inside the
 repo.
 
 ## Set up a broker
@@ -180,6 +180,12 @@ and disconnecting — the sidebar still stays accurate either way, this
 only mutes the log lines. Changing network/broker fields reconnects
 immediately; toggling the presence switch doesn't (no need to bounce the
 connection for a display preference).
+
+**Snip**: the snip button in the chat header picks part of your screen
+and sends it as an image, just like pasting one. On Omarchy it's the same
+picker as the Print Screen key — the screen freezes while you drag out an
+area, a click takes a whole window, and Escape cancels; elsewhere it's
+plain `slurp`. Needs `grim` and `slurp`.
 
 Inside `chat`: `/peers`, `/msg <nick> <text>`, `/send <path> [nick]`,
 `/help`, `/quit`.

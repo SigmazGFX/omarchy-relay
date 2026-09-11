@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.5.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Snip and send",
+                "The snip button in the chat header lets you drag over any part of your screen, or click a "
+                "window, and sends that picture to the chat.",
+            ),
+        ),
+    ),
+    Release(
         version="0.4.0",
         date="2026-09-11",
         items=(

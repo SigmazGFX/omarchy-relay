@@ -3,7 +3,7 @@
 # the package under ~/.local/share, and a launcher on PATH.
 set -euo pipefail
 
-DEPS=(python-paho-mqtt python-cryptography python-textual python-gobject gtk4 libadwaita gstreamer gst-plugins-base gst-plugin-pipewire)
+DEPS=(python-paho-mqtt python-cryptography python-textual python-gobject gtk4 libadwaita gstreamer gst-plugins-base gst-plugin-pipewire grim slurp)
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-relay"
 BIN_DIR="$HOME/.local/bin"

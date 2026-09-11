@@ -16,6 +16,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -647,6 +648,11 @@ class RelayWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         self.title_widget = Adw.WindowTitle(title=self.cfg.network_name)
         header.set_title_widget(self.title_widget)
+        self.snip_btn = Gtk.Button(
+            icon_name="applets-screenshooter-symbolic", tooltip_text="Snip part of your screen and send it"
+        )
+        self.snip_btn.connect("clicked", self._on_snip_clicked)
+        header.pack_end(self.snip_btn)
 
         self.banner = Adw.Banner(title="Couldn't reach the broker", button_label="Settings")
         self.banner.connect("button-clicked", self._on_open_settings)
@@ -654,7 +660,7 @@ class RelayWindow(Adw.ApplicationWindow):
         empty_page = Adw.StatusPage(
             icon_name="user-available-symbolic",
             title="No messages yet",
-            description="Messages on this network show up here.\nPaste an image or attach a file to share it.",
+            description="Messages on this network show up here.\nPaste or snip an image, or attach a file to share it.",
         )
         self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=8)
         # The typing row sits below the messages rather than among them, so
@@ -1671,6 +1677,11 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         tmp_path = Path(tempfile.gettempdir()) / f"omarchy-relay-paste-{uuid.uuid4().hex[:8]}.png"
         texture.save_to_png(str(tmp_path))
+        self._send_temp_image(tmp_path)
+
+    def _send_temp_image(self, tmp_path: Path) -> None:
+        """Broadcasts an image saved to a temporary file (a paste or a snip),
+        shows it in our own chat, and deletes the file shortly after."""
         try:
             send_file(self.client, self.cfg, tmp_path, to="*")
         except (FileNotFoundError, ValueError) as exc:
@@ -1679,11 +1690,39 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         # Our own broadcast files are deliberately not echoed back to us
         # (FileReceiver skips its own sender), so without this we'd never
-        # see the image we just pasted in our own chat.
+        # see the image we just sent in our own chat.
         self._append_image(self.cfg.nickname, tmp_path)
         # _append_image decodes the file into a texture up front, so it's
         # safe to clean up shortly after rather than keep it around.
         GLib.timeout_add_seconds(5, lambda: tmp_path.unlink(missing_ok=True) or False)
+
+    # -- snipping ----------------------------------------------------------
+
+    def _on_snip_clicked(self, _button) -> None:
+        if not shutil.which("grim") or not (shutil.which("omarchy-capture-region") or shutil.which("slurp")):
+            self.toast_overlay.add_toast(Adw.Toast(title="Snipping needs grim and slurp installed"))
+            return
+        self.snip_btn.set_sensitive(False)  # one picker at a time
+        threading.Thread(target=self._snip_worker, daemon=True).start()
+
+    def _snip_worker(self) -> None:
+        # Off the GTK thread: the picker waits on the user for as long as they take.
+        path = Path(tempfile.gettempdir()) / f"omarchy-relay-snip-{uuid.uuid4().hex[:8]}.png"
+        try:
+            snipped = _snip_region(path)
+        except (OSError, subprocess.SubprocessError, SnipError) as exc:
+            path.unlink(missing_ok=True)
+            GLib.idle_add(self._on_snip_done, None, f"Couldn't snip the screen: {exc}")
+            return
+        GLib.idle_add(self._on_snip_done, path if snipped else None, None)
+
+    def _on_snip_done(self, path: Optional[Path], error: Optional[str]) -> bool:
+        self.snip_btn.set_sensitive(True)
+        if error:
+            self.toast_overlay.add_toast(Adw.Toast(title=error))
+        elif path is not None:
+            self._send_temp_image(path)
+        return False
 
     # -- coffee ----------------------------------------------------------
 
@@ -2429,6 +2468,46 @@ class RelayWindow(Adw.ApplicationWindow):
         self.toast_overlay.add_toast(Adw.Toast(title="Settings saved"))
 
         threading.Thread(target=self._connect_worker, daemon=True).start()
+
+
+class SnipError(RuntimeError):
+    pass
+
+
+def _snip_region(path: Path) -> bool:
+    """Lets the user pick part of the screen and saves it to `path` as a PNG;
+    False if they cancel. On Omarchy this is the picker its screenshot key
+    uses (omarchy-capture-region: the screen freezes while you pick, and a
+    click takes a whole window), elsewhere plain slurp. Blocks until the
+    pick is done, so keep it off the GTK thread."""
+    freeze_pid = None
+    try:
+        if shutil.which("omarchy-capture-region"):
+            # --keep-freeze prints the screen freeze's PID first and leaves it
+            # up, so grim captures the frozen picture rather than whatever
+            # moved meanwhile. Ending it is up to us.
+            result = subprocess.run(
+                ["omarchy-capture-region", "smart", "--keep-freeze"], capture_output=True, text=True, check=False
+            )
+            lines = result.stdout.splitlines()
+            if lines and lines[0].strip().isdigit():
+                freeze_pid = int(lines[0])
+            selection = lines[1].strip() if result.returncode == 0 and len(lines) > 1 else ""
+        else:
+            result = subprocess.run(["slurp"], capture_output=True, text=True, check=False)
+            selection = result.stdout.strip() if result.returncode == 0 else ""
+        if not selection:
+            return False
+        grim = subprocess.run(["grim", "-g", selection, str(path)], capture_output=True, text=True, check=False)
+        if grim.returncode != 0:
+            raise SnipError(grim.stderr.strip() or f"grim exited with status {grim.returncode}")
+        return True
+    finally:
+        if freeze_pid is not None:
+            try:
+                os.kill(freeze_pid, signal.SIGTERM)
+            except OSError:
+                pass
 
 
 _hyprland_lua: Optional[bool] = None  # whether this Hyprland takes Lua dispatchers; probed once
