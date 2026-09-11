@@ -36,7 +36,7 @@ gi.require_version("Pango", "1.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango  # noqa: E402
 
-from . import audio, history, network_share, release_notes
+from . import ascii_art, audio, history, network_share, release_notes
 from .chat import _ding, _notify
 from .agents import AgentMailbox, AgentMessageHandler
 from .config import Config
@@ -591,10 +591,10 @@ _TREATS = {
 
 # The composer's inline syntax hints. If Enter is pressed while one is still
 # showing, its placeholders arrive as literal text and are dropped.
-_COMMAND_HINTS = ("/action <nickname> <command-name>", "/ascii <drawing>") + tuple(
+_COMMAND_HINTS = ("/action <nickname> <command-name>", "/ascii <what to draw>") + tuple(
     f"/{kind} <nickname> <note>" for kind in _TREATS
 )
-_HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note|drawing)>")
+_HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note|what to draw)>")
 
 
 def _reply_ref(obj: dict) -> Optional[dict]:
@@ -613,8 +613,8 @@ def _reply_ref(obj: dict) -> Optional[dict]:
 
 def _ascii_drawing(raw: str) -> str:
     """What follows "/ascii", spacing intact: only the space after the
-    command, blank lines around the drawing, and trailing spaces go. An
-    unfilled "<drawing>" hint counts as no drawing."""
+    command, blank lines around it, and trailing spaces go. An unfilled
+    "<what to draw>" hint counts as nothing."""
     body = raw.replace("\r\n", "\n").lstrip()[len("/ascii") :]
     if body[:1] == " ":
         body = body[1:]
@@ -624,7 +624,7 @@ def _ascii_drawing(raw: str) -> str:
     while lines and not lines[-1].strip():
         lines.pop()
     drawing = "\n".join(lines)
-    return "" if drawing.strip() == "<drawing>" else drawing
+    return "" if drawing.strip() == "<what to draw>" else drawing
 
 
 def _text_extra(reply: Optional[dict], ascii_art: bool) -> Optional[dict]:
@@ -1681,12 +1681,8 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         self.entry.set_text("")
         if text.split(maxsplit=1)[0] == "/ascii":
-            # Ahead of the hint cleanup below, which would eat into the drawing's spacing.
-            drawing = _ascii_drawing(raw)
-            if drawing:
-                self._send_text(drawing, ascii_art=True)
-            else:
-                self._append_system("Usage: /ascii <drawing> — paste a multi-line drawing after /ascii")
+            # Ahead of the hint cleanup below, which would eat into a pasted drawing's spacing.
+            self._handle_ascii_command(_ascii_drawing(raw))
             return
         if text.startswith("/"):
             text = _HINT_PLACEHOLDER.sub("", text).strip()
@@ -1698,6 +1694,24 @@ class RelayWindow(Adw.ApplicationWindow):
             self._handle_treat_command(_TREATS[parts[0][1:]], text)
             return
         self._send_text(text)
+
+    def _handle_ascii_command(self, argument: str) -> None:
+        # One line names what to draw; several lines are a pasted drawing, sent as it is.
+        if "\n" in argument:
+            self._send_text(argument, ascii_art=True)
+            return
+        if not argument:
+            self._append_system(
+                "Usage: /ascii <what to draw>. Built-in drawings: "
+                f"{', '.join(ascii_art.SUBJECTS)}. Anything else comes out in big letters."
+            )
+            return
+        try:
+            drawing = ascii_art.draw(argument)
+        except ascii_art.AsciiArtError as exc:
+            self._append_system(str(exc))
+            return
+        self._send_text(drawing, ascii_art=True)
 
     def _send_text(self, text: str, *, ascii_art: bool = False) -> None:
         payload = {

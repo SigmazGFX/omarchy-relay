@@ -98,15 +98,15 @@ cd ~/Projects/omarchy-relay
 
 This installs `python-paho-mqtt`, `python-cryptography`, `python-textual`,
 `python-gobject`, `gtk4`, `libadwaita`, `gstreamer`, `gst-plugins-base`,
-`gst-plugin-pipewire`, `grim`, and `slurp` via `pacman`, copies the package to
+`gst-plugin-pipewire`, `grim`, `slurp`, and `figlet` via `pacman`, copies the package to
 `~/.local/share/omarchy-relay`, puts a launcher at
 `~/.local/bin/omarchy-relay`, and adds "Omarchy Relay" to your app
 launcher.
 
 On another distro: create a venv, `pip install paho-mqtt cryptography
 textual PyGObject`, install GTK4 + libadwaita + GStreamer (core,
-`gst-plugins-base`, and a PipeWire or ALSA source/sink plugin) plus `grim`
-and `slurp` through your package manager, and run `python3 -m omarchy_relay.cli` from inside the
+`gst-plugins-base`, and a PipeWire or ALSA source/sink plugin) plus `grim`,
+`slurp`, and `figlet` through your package manager, and run `python3 -m omarchy_relay.cli` from inside the
 repo.
 
 ## Set up a broker
@@ -213,10 +213,13 @@ show in a bubble at the bottom of the chat (with their name) and under
 their name in the sidebar, and the chat header says so ("Alice is
 typing…"). `chat` and `chat --tui` neither send nor show it.
 
-**ASCII drawings**: `/ascii <drawing>` sends a drawing in a monospaced box
-that keeps its spacing, and scrolls sideways if it's wider than the chat.
-The message box is a single line, so paste a multi-line drawing right
-after `/ascii `. Drawings work with replies and reactions and are kept in
+**ASCII drawings**: `/ascii <what to draw>` sends a ready-made drawing —
+`/ascii cat`, `/ascii rocket`, `/ascii birthday cake`, and dozens more
+(`/ascii` on its own lists them, from `omarchy_relay/ascii_art.py`).
+Anything without a drawing comes out in big `figlet` letters. A
+multi-line drawing pasted right after `/ascii ` is sent as it is. Drawings
+show in a monospaced box that keeps their spacing and scrolls sideways if
+wider than the chat, work with replies and reactions, and are kept in
 message history; `chat`, `chat --tui`, and older clients show them as
 plain text.
 
@@ -411,7 +414,7 @@ currently holds that network's passphrase under that identity.
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
                     presence, remote_actions, agents, chat, cli, tui, gui,
-                    audio, history, network_share, release_notes)
+                    audio, history, network_share, release_notes, ascii_art)
 skills/omarchy-relay/  the Claude Code skill for agent messaging (see
                     Agent messaging above); installed to ~/.agents/skills
 install.sh          installs deps (pacman) + the omarchy-relay launcher + skill

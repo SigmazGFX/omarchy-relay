@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.9.0",
+        date="2026-09-11",
+        items=(
+            (
+                "/ascii draws for you",
+                "/ascii cat sends a ready-made drawing of a cat, and there are dozens more; /ascii on its "
+                "own lists them. Anything else comes out in big letters.",
+            ),
+        ),
+    ),
+    Release(
         version="0.8.0",
         date="2026-09-11",
         items=(
