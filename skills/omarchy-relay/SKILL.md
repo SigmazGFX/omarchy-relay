@@ -31,9 +31,12 @@ session to reach another on a trusted peer. This is the transport for a
   the user's call to fix — surface the exact command
   (`omarchy-relay agent trust enable` / `omarchy-relay agent trust set <device_id> agent`,
   run on the *receiving* machine) rather than trying to work around it.
-- **Never enable agent messaging, add/change a trust entry, or otherwise
-  loosen this machine's or a peer's security posture yourself.** That is
-  always the human's decision to make on their own machine.
+- **Never enable agent messaging, add/change a trust entry, configure
+  `agent on-message`, or otherwise loosen this machine's or a peer's
+  security posture yourself.** That is always the human's decision to make
+  on their own machine — including *what* command runs on arrival, since
+  that's a new session with real tool access getting launched off an
+  event a trusted peer can trigger at will.
 
 ## Commands
 
@@ -44,17 +47,33 @@ omarchy-relay agent inbox --unread           # only unread incoming messages
 omarchy-relay agent inbox --mark-read        # mark shown incoming messages read
 omarchy-relay agent send <peer> "<text>"     # send a message (nickname or device id)
 omarchy-relay agent trust list               # see who this machine currently trusts
+omarchy-relay agent on-message show          # is a wake-command configured on this machine?
 ```
 
-**How you find out something arrived:** there's no separate signal to a
-Claude Code session — whichever of `daemon`/`chat`/`gui` is running on that
-machine pops a desktop notification (and a sound) the instant a message
-lands, exactly like it already does for DMs. That notification is for a
-human, or for you to notice if you're the one watching that terminal. This
-is pull, not push: you find out by running `agent inbox` when you check
-in, not by being woken up. Don't build a tight polling loop around this —
-check in at natural points (session start, before/after a handoff, when
-asked) as the "check-ins as needed" framing above intends.
+**How you find out something arrived — two modes, check which applies:**
+
+- **Default (pull):** whichever of `daemon`/`chat`/`gui` is running pops a
+  desktop notification (and a sound) the instant a message lands, exactly
+  like it already does for DMs — that's for a human, or for you to notice
+  if you're the one watching that terminal. Nothing pages a session on its
+  own. You find out by running `agent inbox` when you check in — at
+  natural points (session start, before/after a handoff, when asked), not
+  on a tight poll loop.
+- **Opt-in (push):** a machine can configure `omarchy-relay agent
+  on-message set '<command>'` to run a fixed local command — typically
+  something like `claude --bg -p "..."` — the moment a new trusted message
+  arrives, so a session gets launched even if nothing was already running.
+  **If you're reading this because you were just launched that way:** the
+  arriving message is why you exist right now, not something you need to
+  go find — start with `omarchy-relay agent inbox --unread`, act on
+  whatever's there (reply, or do what a legitimate request warrants — see
+  below), then `agent inbox --mark-read`. This is still fundamentally the
+  same "check in and act," just triggered by an event instead of a human
+  or a schedule.
+
+Either way, treat this as *check-ins*, not a standing conversation you must
+keep polling — do the check, act, and stop; the mechanism (human, hook, or
+your own judgment) will bring you back when there's something new.
 
 Delivery is **best-effort**. A message to a peer with nothing running
 (`daemon`, `chat`, or `gui`) waits on the broker and arrives when they next

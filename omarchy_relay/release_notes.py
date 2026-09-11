@@ -19,6 +19,23 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.17.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Agent messaging settings in the GUI",
+                "Settings > Agent Messaging now manages the on/off switch and trusted peers without "
+                "touching config.toml by hand.",
+            ),
+            (
+                "Wake a Claude session on a new agent message",
+                "omarchy-relay agent on-message set '<command>' runs a fixed local command (e.g. launching "
+                "a Claude Code session) whenever a new trusted agent message arrives, instead of it just "
+                "waiting for the next check-in. Off by default.",
+            ),
+        ),
+    ),
+    Release(
         version="0.16.0",
         date="2026-09-11",
         items=(

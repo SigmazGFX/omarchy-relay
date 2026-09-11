@@ -49,6 +49,16 @@ class Config:
     # trigger your named shell commands. See agents.py.
     agents_enabled: bool = False
     agents_peers: dict = dataclasses.field(default_factory=dict)  # device_id -> "none"|"agent"
+    # Optional: a fixed, locally-authored shell command run (fire-and-forget,
+    # never awaited) whenever a NEW trusted agent message is accepted — e.g.
+    # `claude --bg -p "check your omarchy-relay agent inbox and reply"` to
+    # actually wake a Claude Code session, since one may not already be
+    # running. Empty = disabled (default): nothing fires, messages just sit
+    # in the mailbox for the next check-in, same as before this existed.
+    # Same principle as remote_actions_commands: the sender's message can
+    # never influence what this string is — only that it runs at all, with
+    # no arguments derived from message content. See agents.py.
+    agents_on_message_command: str = ""
     # Display preference: show "X is online"/"X went offline" lines in the
     # chat log. Peer list/sidebar accuracy is unaffected either way.
     show_presence: bool = True
@@ -101,6 +111,7 @@ class Config:
             remote_actions_commands=dict(remote_actions.get("commands", {})),
             agents_enabled=agents.get("enabled", False),
             agents_peers=dict(agents.get("peers", {})),
+            agents_on_message_command=agents.get("on_message_command", ""),
             show_presence=ui.get("show_presence", True),
             send_read_receipts=ui.get("send_read_receipts", True),
             history_retain_count=ui.get("history_retain_count", 200),
@@ -162,6 +173,7 @@ enabled = {"true" if self.remote_actions_enabled else "false"}
 
 [agents]
 enabled = {"true" if self.agents_enabled else "false"}
+on_message_command = {s(self.agents_on_message_command)}
 
 [agents.peers]
 {_toml_table(self.agents_peers)}

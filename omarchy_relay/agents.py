@@ -28,6 +28,7 @@ only records what this device has actually seen or sent.
 """
 from __future__ import annotations
 
+import subprocess
 import sqlite3
 import threading
 import time
@@ -146,6 +147,11 @@ class AgentMessageHandler:
         # (message_obj) -> None, only called for newly-accepted messages —
         # for UI/log lines, e.g. "bob (agent): <text>"
         self.on_received = on_received
+        # Tracks the most recent agents_on_message_command invocation so a
+        # burst of messages fires it once, not once per message — whatever
+        # it launches (e.g. a Claude session) checks the inbox itself and
+        # will see everything unread, not just the message that woke it.
+        self._proc: Optional[subprocess.Popen] = None
 
     def trust_level(self, device_id: str) -> str:
         return self.cfg.agents_peers.get(device_id, "none")
@@ -169,8 +175,21 @@ class AgentMessageHandler:
             obj.get("nick", sender),
             text,
         )
-        if is_new and self.on_received:
-            self.on_received(obj)
+        if is_new:
+            if self.on_received:
+                self.on_received(obj)
+            self._fire_on_message_command()
+
+    def _fire_on_message_command(self) -> None:
+        shell_cmd = self.cfg.agents_on_message_command
+        if not shell_cmd:
+            return
+        if self._proc is not None and self._proc.poll() is None:
+            return  # a previous invocation is still running — let it see this message too
+        try:
+            self._proc = subprocess.Popen(shell_cmd, shell=True)
+        except Exception:
+            pass  # never let a broken hook command take down the message listener
 
 
 def send_agent_message(client, cfg, mailbox: AgentMailbox, target_device_id: str, target_nick: str, text: str) -> dict:

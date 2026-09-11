@@ -3789,6 +3789,34 @@ class RelayWindow(Adw.ApplicationWindow):
         add_trust_group.add(add_trust_row)
         page.add(add_trust_group)
 
+        # -- On-message command ------------------------------------------------
+        hook_group = Adw.PreferencesGroup(
+            title="On New Message",
+            description=(
+                "Optional: a command run on THIS machine whenever a new trusted agent message "
+                "arrives — e.g. to wake a Claude Code session, since one may not already be running. "
+                "Fixed and local, same principle as Remote Commands: the sender can never influence "
+                "what this runs, only that it runs. Fires once per burst, not once per message. Leave "
+                "blank to disable (default) — messages just wait in the inbox either way."
+            ),
+        )
+        hook_entry = Adw.EntryRow(title="Command")
+        hook_entry.set_text(self.cfg.agents_on_message_command)
+        hook_group.add(hook_entry)
+        hook_save_row = Adw.ActionRow(title="Save command", activatable=True)
+        hook_save_btn = Gtk.Button(icon_name="object-select-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat", "circular"])
+
+        def on_save_hook(_b) -> None:
+            self.cfg.agents_on_message_command = hook_entry.get_text().strip()
+            self.cfg.save()
+            toasts.add_toast(Adw.Toast(title="Saved" if self.cfg.agents_on_message_command else "Cleared"))
+
+        hook_save_btn.connect("clicked", on_save_hook)
+        hook_save_row.add_suffix(hook_save_btn)
+        hook_save_row.set_activatable_widget(hook_save_btn)
+        hook_group.add(hook_save_row)
+        page.add(hook_group)
+
         toolbar_view = Adw.ToolbarView(content=toasts)
         toolbar_view.add_top_bar(header)
         dialog.set_child(toolbar_view)

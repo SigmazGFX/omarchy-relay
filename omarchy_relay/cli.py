@@ -291,6 +291,31 @@ def cmd_agent_trust_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agent_on_message_show(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    if cfg.agents_on_message_command:
+        print(cfg.agents_on_message_command)
+    else:
+        print("(not set — nothing fires when a message arrives, it just waits in the mailbox)")
+    return 0
+
+
+def cmd_agent_on_message_set(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.agents_on_message_command = args.shell_command
+    cfg.save()
+    print(f"on-message command set: {args.shell_command}")
+    return 0
+
+
+def cmd_agent_on_message_clear(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    cfg.agents_on_message_command = ""
+    cfg.save()
+    print("on-message command cleared")
+    return 0
+
+
 def cmd_trust_list(args: argparse.Namespace) -> int:
     cfg = _load_config()
     print(f"remote actions: {'enabled' if cfg.remote_actions_enabled else 'disabled'}")
@@ -480,6 +505,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="'none' revokes access, 'agent' allows exchanging agent messages with this machine",
     )
     p.set_defaults(func=cmd_agent_trust_set)
+
+    agent_hook_parser = agent_sub.add_parser(
+        "on-message",
+        help="run a fixed local command whenever a new trusted agent message arrives (e.g. to wake a Claude session)",
+    )
+    agent_hook_sub = agent_hook_parser.add_subparsers(dest="agent_on_message_command", required=True)
+
+    p = agent_hook_sub.add_parser("show", help="show the current on-message command, if any")
+    p.set_defaults(func=cmd_agent_on_message_show)
+
+    p = agent_hook_sub.add_parser("set", help="set the command to run when a new agent message arrives")
+    p.add_argument(
+        "shell_command",
+        help='the fixed shell command to run, e.g. \'claude --bg -p "check your omarchy-relay agent inbox and reply"\'',
+    )
+    p.set_defaults(func=cmd_agent_on_message_set)
+
+    p = agent_hook_sub.add_parser("clear", help="stop running anything on message arrival")
+    p.set_defaults(func=cmd_agent_on_message_clear)
 
     trust_parser = sub.add_parser(
         "trust", help="manage who may trigger remote actions on THIS machine (off by default)"

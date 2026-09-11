@@ -430,6 +430,27 @@ omarchy-relay agent inbox --unread     # just what's new
 
 Inside `chat` and `chat --tui`: `/agent <nick> <text>`.
 
+**Waking a Claude session automatically:** by default, a new message just
+waits in the mailbox until something checks — no session is paged. If you
+want `daemon`/`chat`/`gui` to actually launch a Claude Code session the
+moment a new trusted message arrives (so it's watched for as long as
+omarchy-relay is running, not just when someone happens to check in), set
+a fixed local command:
+
+```sh
+omarchy-relay agent on-message set 'claude --bg -p "Use the omarchy-relay skill to check your agent inbox and reply to anything new."'
+omarchy-relay agent on-message show    # see what's configured, if anything
+omarchy-relay agent on-message clear   # disable again (default)
+```
+
+Same security shape as [remote actions](#remote-actions): this string is
+fixed and locally authored — the sender can make something run at all, but
+never influence what runs or with what arguments. It fires once per burst
+of arrivals, not once per message (whatever it launches checks the inbox
+itself and sees everything unread), and a broken command can't take down
+the listener. Off by default; the GUI's Settings → Agent Messaging panel
+has the same field.
+
 **How you're alerted:** whichever of `daemon`, `chat`, or `gui` is running
 and connected pops the same desktop notification (`notify-send`) and quiet
 ding it already uses for DMs the moment an agent message arrives — that's
