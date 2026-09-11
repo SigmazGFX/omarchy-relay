@@ -193,7 +193,7 @@ stop and send. Received (and your own sent) voice messages render as a
 play/pause bubble with duration; only one plays at a time. Sent voice
 files land in `transfer.downloads_dir` alongside received ones.
 
-**`/sparkels`**: any message containing this word sets off a five-second
+**`/sparkles`**: any message containing this word sets off a five-second
 pixie-dust burst on every client that renders it, sender included.
 
 **Message history**: recent messages are kept locally (SQLite, under

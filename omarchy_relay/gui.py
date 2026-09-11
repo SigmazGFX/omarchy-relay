@@ -311,7 +311,7 @@ _QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
 # A magic word: any message containing it (case-insensitive) sets off a
 # pixie-dust burst on every client that renders it — sender included, via
 # the broadcast echo.
-_SPARKLE_TRIGGER = "/sparkels"
+_SPARKLE_TRIGGER = "/sparkles"
 _SPARKLE_GLYPHS = ["✨", "💫", "⭐", "🌟"]
 _SPARKLE_COUNT = 28
 _SPARKLE_DURATION_MS = 5000
@@ -369,7 +369,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self.add_breakpoint(narrow)
 
         self.toast_overlay = Adw.ToastOverlay(child=split)
-        # Outermost layer, above toasts/sidebar/composer, so a /sparkels
+        # Outermost layer, above toasts/sidebar/composer, so a /sparkles
         # burst can cover the whole window without a widget hierarchy of
         # its own to keep updated — particles just get added/removed here.
         self.sparkle_overlay = Gtk.Overlay(child=self.toast_overlay)
