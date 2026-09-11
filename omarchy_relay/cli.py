@@ -9,6 +9,7 @@ from pathlib import Path
 from . import config as configmod
 from .agents import AgentMailbox, send_agent_message
 from .chat import run_chat, run_daemon
+from .history import HistoryStore
 from .mqttclient import RelayClient
 from .presence import PeerDirectory
 from .remote_actions import run_action
@@ -373,6 +374,23 @@ def cmd_peers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    store = HistoryStore()
+    try:
+        matches = store.search(cfg.network_name, args.query, limit=args.limit)
+    finally:
+        store.close()
+    if not matches:
+        print("(no messages match)")
+        return 0
+    for m in reversed(matches):  # oldest first, reading down like the chat
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(m["ts"]))
+        dm = " [DM]" if m["is_dm"] else ""
+        print(f"{ts}{dm} {m['nick']}: {m['text']}")
+    return 0
+
+
 def _load_config() -> configmod.Config:
     try:
         return configmod.Config.load()
@@ -412,6 +430,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("peers", help="list who's currently online")
     p.add_argument("--wait", type=float, default=1.5, help="seconds to wait for presence to arrive (default 1.5)")
     p.set_defaults(func=cmd_peers)
+
+    p = sub.add_parser("search", help="search the message history the GUI keeps")
+    p.add_argument("query", help="text to look for, ignoring case (file names count)")
+    p.add_argument("--limit", type=int, default=50, help="how many of the newest matches to show (default 50)")
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("action", help="ask a peer to run a named remote action and print the result")
     p.add_argument("peer", help="nickname or device id of the peer to ask")

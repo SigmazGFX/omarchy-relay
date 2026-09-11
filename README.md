@@ -174,6 +174,7 @@ omarchy-relay peers              # list who's online right now
 omarchy-relay send FILE [--to nickname]   # send a file (default: broadcast)
 omarchy-relay msg "text" [--to nickname]  # one-off message, no interactive session
 omarchy-relay daemon             # headless: prints chat, auto-saves incoming files
+omarchy-relay search TEXT        # search the message history the GUI keeps
 ```
 
 `gui` is also in your application launcher as **Omarchy Relay**. It has a
@@ -252,6 +253,12 @@ fills in someone who's online. Web links (`https://…` and `www.…`) are
 clickable and open in your browser. There are no link previews: fetching
 one would tell the linked site your IP address, and that you're online,
 the moment the message arrived.
+
+**Search**: the magnifier in the chat header (or Ctrl+F) searches message
+history as you type, ignoring case; file names count too. Click a result,
+or press Enter for the newest, to jump to it in the chat. `omarchy-relay
+search <text>` does the same from a terminal. Deleted messages don't turn
+up.
 
 **Replies**: the reply arrow under a message (next to the react button)
 quotes it above the message box; what you send next carries that quote at

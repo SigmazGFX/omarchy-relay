@@ -113,6 +113,18 @@ class HistoryStore:
             for r in rows
         ]
 
+    def search(self, network: str, query: str, limit: int = 50) -> list[dict]:
+        """Messages whose text (a file's name, for files) contains query,
+        ignoring case, newest first. Deleted and hidden messages don't match."""
+        pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        rows = self._conn.execute(
+            "SELECT id, ts, nick, text, is_dm, kind FROM messages "
+            "WHERE network = ? AND kind NOT IN ('deleted', 'hidden') AND text LIKE ? ESCAPE '\\' "
+            "ORDER BY ts DESC LIMIT ?",
+            (network, pattern, limit),
+        ).fetchall()
+        return [{"id": r[0], "ts": r[1], "nick": r[2], "text": r[3], "is_dm": bool(r[4]), "kind": r[5]} for r in rows]
+
     def has_message(self, network: str, msg_id: str) -> bool:
         """Whether msg_id is stored, in any state (deleted and hidden too)."""
         row = self._conn.execute("SELECT 1 FROM messages WHERE network = ? AND id = ?", (network, msg_id)).fetchone()

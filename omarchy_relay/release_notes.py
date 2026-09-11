@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.14.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Search your messages",
+                "The magnifier in the chat header (or Ctrl+F) finds messages and files as you type, and "
+                "takes you to the one you pick. omarchy-relay search does it from a terminal.",
+            ),
+        ),
+    ),
+    Release(
         version="0.13.0",
         date="2026-09-11",
         items=(

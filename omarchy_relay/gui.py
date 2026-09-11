@@ -574,6 +574,11 @@ _TREAT_BURST_MS = 2900
 # without another.
 _BACKLOG_SETTLE_MS = 1500
 
+# Search: how many results to list, and how long to let the chat page fade
+# back in before jumping to the one picked.
+_SEARCH_LIMIT = 50
+_SEARCH_JUMP_DELAY_MS = 250
+
 # Replies quote the start of the message they answer: a preview, not a copy.
 _REPLY_PREVIEW_CHARS = 200
 
@@ -697,6 +702,25 @@ def _message_markup(text: str) -> str:
     return "".join(parts)
 
 
+def _search_snippet(text: str, query: str, width: int = 90) -> str:
+    """Markup for one line of a search result: the text around its first
+    match, with the match in bold."""
+    flat, query = " ".join(text.split()), " ".join(query.split())
+    at = flat.lower().find(query.lower())
+    if at < 0 or not query:
+        return GLib.markup_escape_text(flat[:width])
+    start = max(0, at - width // 3)
+    end = min(len(flat), max(start + width, at + len(query)))
+    before, match, after = flat[start:at], flat[at : at + len(query)], flat[at + len(query) : end]
+    return (
+        ("…" if start else "")
+        + GLib.markup_escape_text(before)
+        + f"<b>{GLib.markup_escape_text(match)}</b>"
+        + GLib.markup_escape_text(after)
+        + ("…" if end < len(flat) else "")
+    )
+
+
 def _file_kind(meta: dict, path: Path) -> str:
     """How a file shows in the chat and history: "voice", "image", or "file"."""
     if meta.get("kind") == "voice" or path.suffix.lower() in _AUDIO_EXTENSIONS:
@@ -785,6 +809,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._backlog_count = 0  # messages held for us while offline, not yet summed up in a notification
         self._backlog_mentions = 0
         self._backlog_timer: Optional[int] = None
+        self._search_rows: dict[Gtk.ListBoxRow, str] = {}  # a search result's row -> its message id
         self._sparkle_active = False
         self._recorder: Optional[audio.Recorder] = None
         self._recording_path: Optional[Path] = None
@@ -889,6 +914,41 @@ class RelayWindow(Adw.ApplicationWindow):
         )
         self.snip_btn.connect("clicked", self._on_snip_clicked)
         header.pack_end(self.snip_btn)
+        search_btn = Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text="Search messages (Ctrl+F)")
+        header.pack_end(search_btn)
+
+        self.search_entry = Gtk.SearchEntry(placeholder_text="Search messages", hexpand=True)
+        self.search_entry.connect("search-changed", self._on_search_changed)
+        self.search_entry.connect("activate", self._on_search_activate)
+        self.search_bar = Gtk.SearchBar(child=Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, child=self.search_entry))
+        self.search_bar.connect_entry(self.search_entry)
+        self.search_bar.bind_property("search-mode-enabled", search_btn, "active", GObject.BindingFlags.BIDIRECTIONAL)
+        self.search_bar.connect("notify::search-mode-enabled", self._on_search_mode_changed)
+        shortcuts = Gtk.ShortcutController(scope=Gtk.ShortcutScope.MANAGED)
+        shortcuts.add_shortcut(
+            Gtk.Shortcut(
+                trigger=Gtk.ShortcutTrigger.parse_string("<Control>f"),
+                action=Gtk.CallbackAction.new(lambda *_: self.search_bar.set_search_mode(True) or True),
+            )
+        )
+        self.add_controller(shortcuts)
+        self.search_results = Gtk.ListBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            valign=Gtk.Align.START,
+            margin_top=12,
+            margin_bottom=12,
+            margin_start=12,
+            margin_end=12,
+            css_classes=["boxed-list"],
+        )
+        self.search_results.set_placeholder(
+            Gtk.Label(label="No messages match", margin_top=12, margin_bottom=12, css_classes=["dim-label"])
+        )
+        self.search_results.connect("row-activated", self._on_search_result_activated)
+        search_page = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            child=Adw.Clamp(maximum_size=_CONTENT_MAX_WIDTH, child=self.search_results),
+        )
 
         self.banner = Adw.Banner(title="Couldn't reach the broker", button_label="Settings")
         self.banner.connect("button-clicked", self._on_open_settings)
@@ -916,9 +976,11 @@ class RelayWindow(Adw.ApplicationWindow):
         self.chat_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, css_classes=["chat-wallpaper"])
         self.chat_stack.add_named(empty_page, "empty")
         self.chat_stack.add_named(self.chat_scroller, "chat")
+        self.chat_stack.add_named(search_page, "search")
 
         view = Adw.ToolbarView(content=self.chat_stack, css_classes=["relay-chat"])
         view.add_top_bar(header)
+        view.add_top_bar(self.search_bar)
         view.add_top_bar(self.banner)
         view.add_bottom_bar(self._build_composer())
         self.content_page = Adw.NavigationPage(title=self.cfg.network_name, child=view)
@@ -1163,7 +1225,8 @@ class RelayWindow(Adw.ApplicationWindow):
             self._stick_to_bottom = True
         self._last_row_was_system = False
         self.chat_box.append(widget)
-        self.chat_stack.set_visible_child_name("chat")
+        if not self.search_bar.get_search_mode():  # a message arriving mid-search leaves the results up
+            self.chat_stack.set_visible_child_name("chat")
 
     def _stamp(self, ts: float) -> Gtk.Label:
         return Gtk.Label(label=_fmt_time(ts), tooltip_text=_fmt_full_time(ts), css_classes=["caption", "stamp"])
@@ -2404,6 +2467,57 @@ class RelayWindow(Adw.ApplicationWindow):
         bubble.add_css_class("flash")
         GLib.timeout_add(900, lambda: bubble.remove_css_class("flash") or False)
 
+    # -- search --------------------------------------------------------------
+
+    def _on_search_mode_changed(self, bar: Gtk.SearchBar, _pspec) -> None:
+        if bar.get_search_mode():
+            self.search_entry.grab_focus()
+            self._on_search_changed(self.search_entry)
+        else:
+            self.search_entry.set_text("")
+            self._show_chat_page()
+
+    def _show_chat_page(self) -> None:
+        self.chat_stack.set_visible_child_name("chat" if self.chat_box.get_first_child() is not None else "empty")
+
+    def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
+        query = entry.get_text().strip()
+        self.search_results.remove_all()
+        self._search_rows.clear()
+        if not query:
+            self._show_chat_page()
+            return
+        for m in self.history.search(self.cfg.network_name, query, limit=_SEARCH_LIMIT):
+            self.search_results.append(self._build_search_row(m, query))
+        self.chat_stack.set_visible_child_name("search")
+
+    def _build_search_row(self, m: dict, query: str) -> Gtk.ListBoxRow:
+        heading = Gtk.Box(spacing=6)
+        heading.append(Gtk.Label(label=m["nick"], xalign=0, css_classes=["caption-heading", _nick_color_class(m["nick"])]))
+        if m["is_dm"]:
+            heading.append(Gtk.Label(label="Direct message", css_classes=["caption", "dm-tag"]))
+        heading.append(Gtk.Label(label=_fmt_full_time(m["ts"]), xalign=1, hexpand=True, css_classes=["caption", "dim-label"]))
+        snippet = Gtk.Label(
+            label=_search_snippet(m["text"], query), use_markup=True, xalign=0, ellipsize=Pango.EllipsizeMode.END
+        )
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
+        box.append(heading)
+        box.append(snippet)
+        row = Gtk.ListBoxRow(child=box, activatable=True)
+        self._search_rows[row] = m["id"]
+        return row
+
+    def _on_search_activate(self, _entry: Gtk.SearchEntry) -> None:
+        row = self.search_results.get_row_at_index(0)  # Enter picks the newest match
+        if row is not None:
+            self._on_search_result_activated(self.search_results, row)
+
+    def _on_search_result_activated(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+        msg_id = self._search_rows.get(row)
+        self.search_bar.set_search_mode(False)
+        if msg_id:
+            GLib.timeout_add(_SEARCH_JUMP_DELAY_MS, lambda: self._jump_to_message(msg_id) or False)
+
     # -- editing and deleting ----------------------------------------------
 
     def _build_message_menu(self, msg_id: str, *, is_mine: bool) -> Gtk.MenuButton:
@@ -3355,6 +3469,7 @@ class RelayWindow(Adw.ApplicationWindow):
     def _apply_new_config(self, new_cfg: Config) -> None:
         self.client.disconnect()
         self._cancel_reply()  # the message being answered belongs to the old network
+        self.search_bar.set_search_mode(False)  # and so do any search results
 
         self.cfg = new_cfg
         self.peers = PeerDirectory()
