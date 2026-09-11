@@ -56,7 +56,7 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 cp -r "$REPO_DIR/omarchy_relay" "$INSTALL_DIR/"
 cat > "$BIN_DIR/omarchy-relay" <<LAUNCHER
 #!/usr/bin/env bash
-exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" python3 -m omarchy_relay.cli "\$@"
+exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" /usr/bin/python3 -m omarchy_relay.cli "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/omarchy-relay"
 
@@ -66,7 +66,7 @@ cp "$REPO_DIR/packaging/omarchy-relay.desktop" "$DESKTOP_DIR/"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
 echo "==> Writing config (HiveMQ public broker, TLS, no auth)"
-python3 -c "
+/usr/bin/python3 -c "
 import sys; sys.path.insert(0, '$INSTALL_DIR')
 from omarchy_relay.config import Config, default_device_id
 Config(

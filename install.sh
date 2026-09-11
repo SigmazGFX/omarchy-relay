@@ -28,7 +28,7 @@ mkdir -p "$BIN_DIR"
 LAUNCHER="$BIN_DIR/omarchy-relay"
 cat > "$LAUNCHER" <<LAUNCHER_EOF
 #!/usr/bin/env bash
-exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" python3 -m omarchy_relay.cli "\$@"
+exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" /usr/bin/python3 -m omarchy_relay.cli "\$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 

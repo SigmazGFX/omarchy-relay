@@ -68,7 +68,7 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 cp -r "$REPO_DIR/omarchy_relay" "$INSTALL_DIR/"
 cat > "$BIN_DIR/omarchy-relay" <<LAUNCHER
 #!/usr/bin/env bash
-exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" python3 -m omarchy_relay.cli "\$@"
+exec env PYTHONPATH="$INSTALL_DIR:\${PYTHONPATH:-}" /usr/bin/python3 -m omarchy_relay.cli "\$@"
 LAUNCHER
 chmod +x "$BIN_DIR/omarchy-relay"
 
@@ -83,7 +83,7 @@ echo "==> Writing config (HiveMQ Cloud, TLS)"
 # into the Python source, so nothing can break out of a string literal.
 CLUSTER_HOST="$CLUSTER_HOST" MQ_USER="$MQ_USER" MQ_PASS="$MQ_PASS" \
 NICKNAME="$NICKNAME" NETWORK_NAME="$NETWORK_NAME" NETWORK_PASSPHRASE="$NETWORK_PASSPHRASE" \
-python3 -c "
+/usr/bin/python3 -c "
 import os, sys
 sys.path.insert(0, '$INSTALL_DIR')
 from omarchy_relay.config import Config, default_device_id
