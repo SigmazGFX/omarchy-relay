@@ -147,12 +147,23 @@ button.recording {
   background-color: color-mix(in srgb, var(--accent-bg-color) 30%, var(--card-bg-color));
   box-shadow: inset 0 0 0 1px var(--accent-color);
 }
-.react-btn {
-  min-width: 22px;
-  min-height: 22px;
-  opacity: 0.55;
+/* The smiley and chevron beside a message stay hidden until the pointer is
+   over it (or one of their popovers is open), like WhatsApp. */
+.message-actions {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
 }
-.react-btn:hover {
+.message-actions.shown {
+  opacity: 1;
+}
+.react-btn {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  opacity: 0.6;
+}
+.react-btn:hover,
+.react-btn:checked {
   opacity: 1;
 }
 .reaction-popover .reaction-pick {
@@ -1301,7 +1312,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 column.append(sender)
                 head = (avatar, sender)
         column.append(bubble)
-        record = {"row": row, "column": column, "bubble": bubble, "footer": None, "head": head}
+        record = {"row": row, "column": column, "bubble": bubble, "footer": None, "actions": None, "head": head}
         if msg_id:
             self._message_meta[msg_id] = {
                 "is_dm": is_dm,
@@ -1314,11 +1325,10 @@ class RelayWindow(Adw.ApplicationWindow):
             self._message_bubbles[msg_id] = bubble
             reactions_row = Gtk.Box(spacing=4, css_classes=["reactions-row"])
             self._reaction_slots[msg_id] = reactions_row
+            # Under the bubble: only its reactions and, on your own, the ticks.
+            # Reacting, replying, and the rest are in the strip beside it.
             footer = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
             footer.append(reactions_row)
-            footer.append(self._build_react_button(msg_id))
-            footer.append(self._build_reply_button(msg_id))
-            footer.append(self._build_message_menu(msg_id, is_mine=is_mine))
             if is_mine:
                 footer.set_halign(Gtk.Align.END)
                 receipt = Gtk.Label(label="✓", tooltip_text="Sent", valign=Gtk.Align.CENTER, css_classes=["caption", "receipt"])
@@ -1326,8 +1336,16 @@ class RelayWindow(Adw.ApplicationWindow):
                 self._receipt_labels[msg_id] = receipt
             column.append(footer)
             record["footer"] = footer
+            record["actions"] = self._build_message_actions(row, msg_id, is_mine=is_mine)
             self._message_rows[msg_id] = record
+        # The strip sits on the chat's inner side of the bubble: left of your
+        # own messages, right of everyone else's.
+        actions = record["actions"]
+        if actions is not None and is_mine:
+            row.append(actions)
         row.append(column)
+        if actions is not None and not is_mine:
+            row.append(actions)
         self._bubble_rows[row] = record
         self._append_row(row, follow=is_mine)
 
@@ -2443,15 +2461,49 @@ class RelayWindow(Adw.ApplicationWindow):
 
     # -- replies -----------------------------------------------------------
 
-    def _build_reply_button(self, msg_id: str) -> Gtk.Button:
-        button = Gtk.Button(
-            icon_name="mail-reply-sender-symbolic",
-            tooltip_text="Reply",
-            valign=Gtk.Align.CENTER,
-            css_classes=["flat", "circular", "react-btn"],
-        )
-        button.connect("clicked", lambda _b: self._start_reply(msg_id))
-        return button
+    def _build_message_actions(self, row: Gtk.Box, msg_id: str, *, is_mine: bool) -> Gtk.Box:
+        """The smiley and chevron beside a message, WhatsApp-style: shown while
+        the pointer is over the message or one of their popovers is open. A
+        right-click anywhere on the message opens the chevron's menu."""
+        react = self._build_react_button(msg_id)
+        menu = self._build_message_menu(msg_id, is_mine=is_mine)
+        actions = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER, can_target=False, css_classes=["message-actions"])
+        # The smiley next to the bubble, the chevron on the outside.
+        for button in (menu, react) if is_mine else (react, menu):
+            actions.append(button)
+        hovered = False
+
+        def update(*_args) -> None:
+            shown = hovered or react.get_active() or menu.get_active()
+            # Hidden buttons mustn't catch clicks meant for the chat behind them.
+            actions.set_can_target(shown)
+            if shown:
+                actions.add_css_class("shown")
+            else:
+                actions.remove_css_class("shown")
+
+        def set_hovered(value: bool) -> None:
+            nonlocal hovered
+            hovered = value
+            update()
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_: set_hovered(True))
+        motion.connect("leave", lambda *_: set_hovered(False))
+        row.add_controller(motion)
+        react.connect("notify::active", update)
+        menu.connect("notify::active", update)
+
+        # Capture phase and claimed, so a selectable message label's own
+        # right-click menu doesn't open instead; this menu has Copy.
+        def on_right_click(gesture: Gtk.GestureClick, *_args) -> None:
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            menu.popup()
+
+        right_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY, propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        right_click.connect("pressed", on_right_click)
+        row.add_controller(right_click)
+        return actions
 
     def _build_reply_quote(self, reply_to: dict) -> Gtk.Widget:
         labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -2655,7 +2707,9 @@ class RelayWindow(Adw.ApplicationWindow):
         items = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6
         )
-        choices = []
+        choices = [("Reply", False, self._start_reply)]
+        if msg_id in self._message_texts:
+            choices.append(("Copy", False, self._copy_message))
         if is_mine and msg_id in self._message_texts:
             choices.append(("Edit", False, self._start_edit))
         if is_mine:
@@ -2669,7 +2723,7 @@ class RelayWindow(Adw.ApplicationWindow):
             item.connect("clicked", self._on_message_menu_item, msg_id, action)
             items.append(item)
         return Gtk.MenuButton(
-            icon_name="view-more-symbolic",
+            icon_name="pan-down-symbolic",
             tooltip_text="More",
             valign=Gtk.Align.CENTER,
             css_classes=["flat", "circular", "react-btn"],
@@ -2680,6 +2734,13 @@ class RelayWindow(Adw.ApplicationWindow):
         button.get_ancestor(Gtk.Popover).popdown()
         # Deleting takes this menu's own button out of the chat, so not from inside its click.
         GLib.idle_add(lambda: action(msg_id) or False)
+
+    def _copy_message(self, msg_id: str) -> None:
+        texts = self._message_texts.get(msg_id)
+        if texts is None:
+            return
+        self.get_clipboard().set(texts[0].get_text())
+        self.toast_overlay.add_toast(Adw.Toast(title="Copied"))
 
     def _start_edit(self, msg_id: str) -> None:
         texts = self._message_texts.get(msg_id)
@@ -2838,7 +2899,10 @@ class RelayWindow(Adw.ApplicationWindow):
         column.insert_child_after(new, old)
         column.remove(old)
         column.remove(record["footer"])
-        record["bubble"], record["footer"] = new, None
+        # Nothing left to react to or reply to: the hover strip goes too.
+        if record["actions"] is not None:
+            record["row"].remove(record["actions"])
+        record["bubble"], record["footer"], record["actions"] = new, None, None
         self._message_bubbles[msg_id] = new
         if self._group_bubble is old:
             self._group_bubble = new

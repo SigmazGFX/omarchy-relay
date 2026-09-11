@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.16.0",
+        date="2026-09-11",
+        items=(
+            (
+                "A quieter chat",
+                "The react, reply, and ⋯ buttons no longer sit under every message. Hover a message for a "
+                "smiley and a menu with Reply, Copy, Edit, and Delete, or right-click it, like WhatsApp.",
+            ),
+        ),
+    ),
+    Release(
         version="0.15.0",
         date="2026-09-11",
         items=(
