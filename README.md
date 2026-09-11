@@ -197,8 +197,12 @@ picker as the Print Screen key — the screen freezes while you drag out an
 area, a click takes a whole window, and Escape cancels; elsewhere it's
 plain `slurp`. Needs `grim` and `slurp`.
 
-Inside `chat`: `/peers`, `/msg <nick> <text>`, `/send <path> [nick]`,
-`/help`, `/quit`.
+Inside `chat` and `chat --tui`: `/peers`, `/msg <nick> <text>`, `/send
+<path> [nick]`, `/react <emoji>` (on the last message from someone else;
+again to take it back), `/edit <text>` and `/delete` (your last message),
+`/action <nick> <name>`, `/agent <nick> <text>`, `/help`, `/quit`.
+Reactions, edits, and deletes from others print as a line saying what
+changed.
 
 Received files land in `transfer.downloads_dir` (default
 `~/Downloads/omarchy-relay`) — in `gui`, that log entry has an **Open
@@ -221,7 +225,8 @@ pixie-dust burst on every client that renders it, sender included.
 **Typing status**: while someone is typing in `gui`, three bouncing dots
 show in a bubble at the bottom of the chat (with their name) and under
 their name in the sidebar, and the chat header says so ("Alice is
-typing…"). `chat` and `chat --tui` neither send nor show it.
+typing…"). `chat --tui` sends it too, and shows who's typing in its status
+line; `chat` does neither.
 
 **ASCII drawings**: `/ascii <what to draw>` sends a ready-made drawing —
 `/ascii cat`, `/ascii rocket`, `/ascii birthday cake`, and dozens more
@@ -235,11 +240,14 @@ plain text.
 
 **Reactions**: the smiley under a message picks a quick reaction; click a
 reaction pill to add or take back your own. Reactions are kept in message
-history with the message they're on, and go when it's deleted.
+history with the message they're on, and go when it's deleted. In `chat`
+and `chat --tui`, `/react <emoji>` reacts to the last message from someone
+else.
 
 **Mentions and links**: `@nickname` in a message shows in bold, and a
 message that mentions you gets a highlight and a notification that stays
-on screen until you dismiss it. Tab after `@` and the start of a name
+on screen until you dismiss it (in `chat` and `chat --tui`, the
+notification). Tab after `@` and the start of a name
 fills in someone who's online. Web links (`https://…` and `www.…`) are
 clickable and open in your browser. There are no link previews: fetching
 one would tell the linked site your IP address, and that you're online,
@@ -261,9 +269,10 @@ its place, in history too, with its text gone; one deleted for you just
 disappears from your chat and history. Quotes of it in replies keep what
 they quoted. Only the device that sent a message can edit or delete it for
 everyone — though, as with DMs, that device is claimed rather than proven,
-so anyone holding the network passphrase could pose as it. `chat`, `chat
---tui`, and older clients show an edit as a new "(edited) …" message and a
-delete as "(deleted a message)". Files, images, and voice messages have
+so anyone holding the network passphrase could pose as it. `chat` and
+`chat --tui` print a line for an edit or delete, and edit or delete your
+own last message with `/edit` and `/delete`; older clients show an edit as
+a new "(edited) …" message and a delete as "(deleted a message)". Files, images, and voice messages have
 the same react, reply, and ⋯ buttons (without Edit); deleting one leaves
 the saved file where it is in your downloads folder.
 
@@ -325,8 +334,8 @@ transfers without keeping a chat window open.
 
 A peer can ask another machine to run a **named** action over the relay —
 e.g. checking status, restarting a service, triggering a script that's
-already there. **Off by default.** Serviced by `chat`, `daemon`, and
-`gui` (not yet by `chat --tui`) — whichever of those you have running is
+already there. **Off by default.** Serviced by `chat`, `chat --tui`,
+`daemon`, and `gui` — whichever of those you have running is
 what responds; don't run more than one at a time under the same identity,
 since each connects to the broker with the same MQTT client ID (your
 device_id) and the broker disconnects whichever held it first.
@@ -364,7 +373,7 @@ omarchy-relay trust set <their-device-id> none      # revoke
 omarchy-relay action <their-nickname> status        # from the other machine: run it, print the result
 ```
 
-Inside `chat`: `/action <nick> <name>`. Inside `gui`'s message box: the
+Inside `chat` and `chat --tui`: `/action <nick> <name>`. Inside `gui`'s message box: the
 same `/action <nickname> <command-name>`, sent instead of as a chat
 message — typing `/action` there shows the syntax as inline ghost/
 selected text to guide you, and the result (or a timeout/denial) prints
@@ -403,7 +412,7 @@ omarchy-relay agent inbox              # everything sent/received, oldest first
 omarchy-relay agent inbox --unread     # just what's new
 ```
 
-Inside `chat`: `/agent <nick> <text>`.
+Inside `chat` and `chat --tui`: `/agent <nick> <text>`.
 
 **How you're alerted:** whichever of `daemon`, `chat`, or `gui` is running
 and connected pops the same desktop notification (`notify-send`) and quiet

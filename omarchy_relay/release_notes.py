@@ -19,6 +19,17 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.13.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Terminal chat catches up",
+                "chat and chat --tui show reactions, edits, and deletes, notify you of mentions, and have "
+                "/react, /edit, and /delete. The TUI also shows who's typing and has /action and /agent.",
+            ),
+        ),
+    ),
+    Release(
         version="0.12.0",
         date="2026-09-11",
         items=(

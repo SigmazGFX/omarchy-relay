@@ -37,7 +37,7 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango  # noqa: E402
 
 from . import ascii_art, audio, history, network_share, release_notes
-from .chat import _ding, _notify
+from .chat import _ding, _mentions, _notify
 from .agents import AgentMailbox, AgentMessageHandler
 from .config import Config
 from .mqttclient import RelayClient
@@ -675,11 +675,6 @@ def _trim_trailing_punctuation(token: str) -> str:
             break  # a link's own brackets, as in a Wikipedia page name
         token = token[:-1]
     return token
-
-
-def _mentions(text: str, nick: str) -> bool:
-    """Whether text @mentions nick: case-insensitive, and the whole name."""
-    return bool(nick) and re.search(rf"(?<![\w@])@{re.escape(nick)}(?![\w-])", text, re.IGNORECASE) is not None
 
 
 def _message_markup(text: str) -> str:
