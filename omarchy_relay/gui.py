@@ -245,14 +245,15 @@ button.send-button {
   padding: 9px 14px 11px 14px;
 }
 
-/* Coffee: the card in the chat, and the steaming cup that pops up over
-   the window when one is sent or received. */
-.coffee-card .coffee-cup {
+/* Treats (/coffee, /cocktail, /dancer): the card in the chat, and the
+   animation that pops up over the window when one is sent or received. */
+.treat-card .treat-emoji {
   font-size: 2.4em;
 }
-/* Every keyframe spells out the same translateY() scale() pair: GTK falls
-   back to matrix interpolation between mismatched transform lists, and a
-   color emoji drawn through that renders as a solid pink square. */
+/* Every keyframe of an animation spells out the same transform list (e.g.
+   translateY() scale()): GTK falls back to matrix interpolation between
+   mismatched transform lists, and a color emoji drawn through that renders
+   as a solid pink square. */
 @keyframes relay-coffee-pop {
   0% { transform: translateY(0) scale(0.2); opacity: 0; }
   14% { transform: translateY(0) scale(1.15); opacity: 1; }
@@ -260,24 +261,48 @@ button.send-button {
   78% { transform: translateY(0) scale(1); opacity: 1; }
   100% { transform: translateY(-30px) scale(1); opacity: 0; }
 }
-@keyframes relay-coffee-steam {
+@keyframes relay-cocktail-clink {
+  0% { transform: translateY(0) scale(0.2) rotate(0deg); opacity: 0; }
+  14% { transform: translateY(0) scale(1.15) rotate(0deg); opacity: 1; }
+  24% { transform: translateY(0) scale(1) rotate(-16deg); opacity: 1; }
+  34% { transform: translateY(0) scale(1) rotate(12deg); opacity: 1; }
+  44% { transform: translateY(0) scale(1) rotate(-7deg); opacity: 1; }
+  54% { transform: translateY(0) scale(1) rotate(0deg); opacity: 1; }
+  78% { transform: translateY(0) scale(1) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(-30px) scale(1) rotate(0deg); opacity: 0; }
+}
+@keyframes relay-dancer-dance {
+  0% { transform: translate(0, 0) scale(0.2) rotate(0deg); opacity: 0; }
+  12% { transform: translate(0, 0) scale(1.1) rotate(0deg); opacity: 1; }
+  22% { transform: translate(-28px, -16px) scale(1) rotate(-12deg); opacity: 1; }
+  32% { transform: translate(0, 0) scale(1) rotate(0deg); opacity: 1; }
+  42% { transform: translate(28px, -16px) scale(1) rotate(12deg); opacity: 1; }
+  52% { transform: translate(0, 0) scale(1) rotate(0deg); opacity: 1; }
+  62% { transform: translate(-28px, -16px) scale(1) rotate(-12deg); opacity: 1; }
+  72% { transform: translate(0, 0) scale(1) rotate(0deg); opacity: 1; }
+  82% { transform: translate(0, 0) scale(1) rotate(0deg); opacity: 1; }
+  100% { transform: translate(0, -30px) scale(1) rotate(0deg); opacity: 0; }
+}
+@keyframes relay-treat-rise {
   0% { transform: translateY(12px) scale(0.6); opacity: 0; }
   35% { opacity: 0.75; }
   100% { transform: translateY(-70px) scale(1.5); opacity: 0; }
 }
-.coffee-burst-cup {
+.treat-burst {
   font-size: 6em;
-  animation: relay-coffee-pop 2.8s ease-out both;
 }
-.coffee-steam {
+.coffee-burst { animation: relay-coffee-pop 2.8s ease-out both; }
+.cocktail-burst { animation: relay-cocktail-clink 2.8s ease-out both; }
+.dancer-burst { animation: relay-dancer-dance 2.8s ease-in-out both; }
+.treat-rise {
   font-size: 2.2em;
   font-weight: bold;
   opacity: 0;
-  animation: relay-coffee-steam 2.2s ease-out both;
+  animation: relay-treat-rise 2.2s ease-out both;
 }
-.coffee-steam.steam-1 { animation-delay: 0.35s; }
-.coffee-steam.steam-2 { animation-delay: 0.6s; }
-.coffee-steam.steam-3 { animation-delay: 0.85s; }
+.treat-rise.rise-1 { animation-delay: 0.35s; }
+.treat-rise.rise-2 { animation-delay: 0.6s; }
+.treat-rise.rise-3 { animation-delay: 0.85s; }
 """
 
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?")
@@ -476,13 +501,49 @@ _SPARKLE_COUNT = 28
 _SPARKLE_DURATION_MS = 5000
 _SPARKLE_STEP_MS = 50
 
-# /coffee: how long the steaming cup stays up over the window.
-_COFFEE_BURST_MS = 2900
-_COFFEE_STEAM_GLYPH = "∿"
+# /coffee, /cocktail, /dancer: how long the animation stays up over the window.
+_TREAT_BURST_MS = 2900
+
+
+@dataclasses.dataclass(frozen=True)
+class _Treat:
+    """Something to send: /<kind> for everyone, /<kind> <nickname> [note] for
+    one person. `kind` is also the chat message's "type" and the history
+    row's kind, so it never changes once shipped."""
+
+    kind: str
+    emoji: str
+    noun: str  # the card's "a coffee"
+    gift: str  # notifications' and older clients' "a cup of coffee"
+    everyone_verb: str  # "bought" everyone a coffee
+    rising: str  # one glyph per floating wisp over the animation
+    self_toast: str
+
+    def phrase(self, *, to_one: bool) -> str:
+        """For notifications and older clients: "sent you a cup of coffee"."""
+        return f"sent you {self.gift}" if to_one else f"{self.everyone_verb} everyone {self.gift}"
+
+    def headline(self, *, is_mine: bool, to_one: bool, to_nick: str) -> str:
+        """The card's heading: "You bought everyone a coffee", "Sent you a coffee"."""
+        if is_mine:
+            if to_one:
+                return f"You sent {to_nick or 'them'} a {self.noun}"
+            return f"You {self.everyone_verb} everyone a {self.noun}"
+        return f"Sent you a {self.noun}" if to_one else f"{self.everyone_verb.capitalize()} everyone a {self.noun}"
+
+
+_TREATS = {
+    treat.kind: treat
+    for treat in (
+        _Treat("coffee", "☕", "coffee", "a cup of coffee", "bought", "∿∿∿", "That one you'll have to make yourself ☕"),
+        _Treat("cocktail", "🍸", "cocktail", "a cocktail", "bought", "∘°∘", "That one you'll have to mix yourself 🍸"),
+        _Treat("dancer", "💃", "dancer", "a dancer", "sent", "♪♫♪", "You'll have to dance for yourself 💃"),
+    )
+}
 
 # The composer's inline syntax hints. If Enter is pressed while one is still
 # showing, its placeholders arrive as literal text and are dropped.
-_COMMAND_HINTS = ("/action <nickname> <command-name>", "/coffee <nickname> <note>")
+_COMMAND_HINTS = ("/action <nickname> <command-name>",) + tuple(f"/{kind} <nickname> <note>" for kind in _TREATS)
 _HINT_PLACEHOLDER = re.compile(r"\s*<(?:nickname|command-name|note)>")
 
 
@@ -558,7 +619,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._voice_players: list[dict] = []  # each: {"player": audio.Player | None, "reset": callable}
         self._typing_sent_at = 0.0  # monotonic time we last told peers we're typing; 0 = we aren't
         self._typing_peers: dict[str, tuple[str, int]] = {}  # device_id -> (nick, expiry GLib source id)
-        self._coffee_active = False
+        self._treat_active = False
         self._hyprland_lock = threading.Lock()
         self._hyprland_floated = False  # the window lock floated the window, so unlocking tiles it again
         self._hyprland_watch: Optional[socket.socket] = None  # Hyprland's event socket, followed while locked
@@ -1164,8 +1225,8 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
             return
-        if obj.get("type") == "coffee":
-            self._handle_coffee(obj, is_dm=False)
+        if obj.get("type") in _TREATS:
+            self._handle_treat(_TREATS[obj["type"]], obj, is_dm=False)
             return
         self._clear_typing(obj.get("from", ""))
         is_mine = obj.get("from") == self.cfg.device_id
@@ -1181,8 +1242,8 @@ class RelayWindow(Adw.ApplicationWindow):
         if obj.get("type") == "reaction":
             self._handle_reaction(obj)
             return
-        if obj.get("type") == "coffee":
-            self._handle_coffee(obj, is_dm=True)
+        if obj.get("type") in _TREATS:
+            self._handle_treat(_TREATS[obj["type"]], obj, is_dm=True)
             return
         self._append_text(
             obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_dm=True, dm_peer_device_id=obj.get("from")
@@ -1223,8 +1284,9 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         for m in messages:
             is_mine = m["from_device"] == self.cfg.device_id
-            if m["kind"] == "coffee":
-                self._append_coffee(
+            if m["kind"] in _TREATS:
+                self._append_treat(
+                    _TREATS[m["kind"]],
                     m["nick"],
                     m["ts"],
                     to_nick=m["extra"].get("to_nick", ""),
@@ -1387,8 +1449,8 @@ class RelayWindow(Adw.ApplicationWindow):
         if parts and parts[0] == "/action":
             self._handle_action_command(parts)
             return
-        if parts and parts[0] == "/coffee":
-            self._handle_coffee_command(text)
+        if parts and parts[0].startswith("/") and parts[0][1:] in _TREATS:
+            self._handle_treat_command(_TREATS[parts[0][1:]], text)
             return
         self.client.send_chat(
             {"id": uuid.uuid4().hex, "ts": time.time(), "from": self.cfg.device_id, "nick": self.cfg.nickname, "text": text}
@@ -1733,31 +1795,31 @@ class RelayWindow(Adw.ApplicationWindow):
             self._send_temp_image(path)
         return False
 
-    # -- coffee ----------------------------------------------------------
+    # -- treats: coffee, cocktails, dancers ---------------------------------
 
-    def _handle_coffee_command(self, text: str) -> None:
+    def _handle_treat_command(self, treat: _Treat, text: str) -> None:
         # "/coffee" is for everyone; "/coffee <nickname> [note]" for one
         # person. When the first word isn't anyone online, it's all a note.
-        rest = text[len("/coffee") :].strip()
+        rest = text[len(treat.kind) + 1 :].strip()
         target, note = None, rest
         if rest:
             first, _space, remainder = rest.partition(" ")
             resolved = self.peers.resolve(first)
             if resolved:
                 target, note = resolved, remainder.strip()
-        self._send_coffee(target, note)
+        self._send_treat(treat, target, note)
 
-    def _send_coffee(self, target_device_id: Optional[str], note: str = "") -> None:
+    def _send_treat(self, treat: _Treat, target_device_id: Optional[str], note: str = "") -> None:
         if target_device_id == self.cfg.device_id:
-            self.toast_overlay.add_toast(Adw.Toast(title="That one you'll have to make yourself ☕"))
+            self.toast_overlay.add_toast(Adw.Toast(title=treat.self_toast))
             return
         if not self.client.connected.is_set():
-            self.toast_overlay.add_toast(Adw.Toast(title="Not connected — the coffee will have to wait"))
+            self.toast_overlay.add_toast(Adw.Toast(title=f"Not connected — the {treat.noun} will have to wait"))
             return
         to_nick = self.peers.snapshot().get(target_device_id, {}).get("nick", "") if target_device_id else ""
-        fallback = "☕ sent you a cup of coffee" if target_device_id else "☕ bought everyone a cup of coffee"
+        fallback = f"{treat.emoji} {treat.phrase(to_one=bool(target_device_id))}"
         payload = {
-            "type": "coffee",
+            "type": treat.kind,
             "id": uuid.uuid4().hex,
             "ts": time.time(),
             "from": self.cfg.device_id,
@@ -1771,17 +1833,18 @@ class RelayWindow(Adw.ApplicationWindow):
         if target_device_id:
             self.client.send_dm(target_device_id, payload)
             # DMs aren't echoed back to the sender the way broadcasts are.
-            self._handle_coffee(payload, is_dm=True)
+            self._handle_treat(treat, payload, is_dm=True)
         else:
             self.client.send_chat(payload)
 
-    def _handle_coffee(self, obj: dict, *, is_dm: bool) -> None:
+    def _handle_treat(self, treat: _Treat, obj: dict, *, is_dm: bool) -> None:
         sender = obj.get("from", "")
         is_mine = sender == self.cfg.device_id
         self._clear_typing(sender)
         peer_device_id = (obj.get("to") if is_mine else sender) if is_dm else None
         to_nick, note = obj.get("to_nick", ""), obj.get("note", "")
-        self._append_coffee(
+        self._append_treat(
+            treat,
             obj["nick"],
             obj["ts"],
             to_nick=to_nick,
@@ -1792,15 +1855,16 @@ class RelayWindow(Adw.ApplicationWindow):
             dm_peer_device_id=peer_device_id,
         )
         self._remember(
-            obj, is_dm=is_dm, peer_device_id=peer_device_id, kind="coffee", extra={"to_nick": to_nick, "note": note}
+            obj, is_dm=is_dm, peer_device_id=peer_device_id, kind=treat.kind, extra={"to_nick": to_nick, "note": note}
         )
-        self._play_coffee()
+        self._play_treat(treat)
         if not is_mine:
-            _notify(obj["nick"], "sent you a cup of coffee ☕" if is_dm else "bought everyone a cup of coffee ☕")
+            _notify(obj["nick"], f"{treat.phrase(to_one=is_dm)} {treat.emoji}")
             _ding()
 
-    def _append_coffee(
+    def _append_treat(
         self,
+        treat: _Treat,
         nick: str,
         ts: float,
         *,
@@ -1811,10 +1875,7 @@ class RelayWindow(Adw.ApplicationWindow):
         is_dm: bool = False,
         dm_peer_device_id: Optional[str] = None,
     ) -> None:
-        if is_mine:
-            headline = f"You sent {to_nick or 'them'} a coffee" if is_dm else "You bought everyone a coffee"
-        else:
-            headline = "Sent you a coffee" if is_dm else "Bought everyone a coffee"
+        headline = treat.headline(is_mine=is_mine, to_one=is_dm, to_nick=to_nick)
         info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
         info.append(Gtk.Label(label=headline, xalign=0, wrap=True, css_classes=["heading"]))
         if note:
@@ -1831,33 +1892,33 @@ class RelayWindow(Adw.ApplicationWindow):
         stamp = self._stamp(ts)
         stamp.set_halign(Gtk.Align.START)
         info.append(stamp)
-        bubble = Gtk.Box(spacing=12, css_classes=["bubble", "coffee-card"])
-        bubble.append(Gtk.Label(label="☕", valign=Gtk.Align.CENTER, css_classes=["coffee-cup"]))
+        bubble = Gtk.Box(spacing=12, css_classes=["bubble", "treat-card", f"{treat.kind}-card"])
+        bubble.append(Gtk.Label(label=treat.emoji, valign=Gtk.Align.CENTER, css_classes=["treat-emoji"]))
         bubble.append(info)
         self._append_bubble(
             bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm, msg_id=msg_id, dm_peer_device_id=dm_peer_device_id
         )
 
-    def _play_coffee(self) -> None:
-        if self._coffee_active:
-            return  # one cup at a time
-        self._coffee_active = True
-        steam = Gtk.Box(spacing=14, halign=Gtk.Align.CENTER)
-        for n in (1, 2, 3):
-            steam.append(Gtk.Label(label=_COFFEE_STEAM_GLYPH, css_classes=["coffee-steam", f"steam-{n}"]))
+    def _play_treat(self, treat: _Treat) -> None:
+        if self._treat_active:
+            return  # one at a time
+        self._treat_active = True
+        rising = Gtk.Box(spacing=14, halign=Gtk.Align.CENTER)
+        for n, glyph in enumerate(treat.rising, start=1):
+            rising.append(Gtk.Label(label=glyph, css_classes=["treat-rise", f"rise-{n}"]))
         stage = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, can_target=False
         )
-        stage.append(steam)
-        stage.append(Gtk.Label(label="☕", css_classes=["coffee-burst-cup"]))
+        stage.append(rising)
+        stage.append(Gtk.Label(label=treat.emoji, css_classes=["treat-burst", f"{treat.kind}-burst"]))
         self.sparkle_overlay.add_overlay(stage)
 
         def finish() -> bool:
             self.sparkle_overlay.remove_overlay(stage)
-            self._coffee_active = False
+            self._treat_active = False
             return False
 
-        GLib.timeout_add(_COFFEE_BURST_MS, finish)
+        GLib.timeout_add(_TREAT_BURST_MS, finish)
 
     # -- what's new --------------------------------------------------------
 

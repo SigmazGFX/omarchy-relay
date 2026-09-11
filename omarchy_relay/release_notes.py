@@ -23,6 +23,11 @@ RELEASES: tuple[Release, ...] = (
         date="2026-09-11",
         items=(
             ("Expand images", "Double-click an image in the chat to see it full size. Escape closes it."),
+            (
+                "Cocktails and dancers",
+                "Like /coffee: /cocktail and /dancer send one to everyone, or to one person with "
+                "/cocktail <nickname> [note].",
+            ),
         ),
     ),
     Release(

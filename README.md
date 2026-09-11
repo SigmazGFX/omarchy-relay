@@ -213,12 +213,14 @@ show in a bubble at the bottom of the chat (with their name) and under
 their name in the sidebar, and the chat header says so ("Alice is
 typing…"). `chat` and `chat --tui` neither send nor show it.
 
-**Coffee**: `/coffee` buys everyone a virtual cup of coffee, and `/coffee
-<nickname> [note]` sends one to one person — the command is the only way
-to send one. It lands as a coffee card (reactions work on it
-like any message) with a steaming cup popping up over the window, and is
-kept in message history. Older clients, `chat`, and `chat --tui` show it as
-an ordinary message ("☕ sent you a cup of coffee").
+**Coffee, cocktails, and dancers**: `/coffee`, `/cocktail`, and `/dancer`
+send one to everyone, and `/coffee <nickname> [note]` (likewise
+`/cocktail` and `/dancer`) sends one to one person — the commands are the
+only way to send them. Each lands as a card (reactions work on it like any
+message) with an animation over the window — a steaming cup, a clinking
+glass, a dancer — and is kept in message history. Older clients, `chat`,
+and `chat --tui` show it as an ordinary message ("☕ sent you a cup of
+coffee", "🍸 bought everyone a cocktail").
 
 **What's New**: the main menu's **What's New** lists what changed in each
 release, and it opens by itself once after an update. Release notes live
