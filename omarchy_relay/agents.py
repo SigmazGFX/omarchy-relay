@@ -29,6 +29,7 @@ device has actually seen or sent.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -56,13 +57,23 @@ class AgentMailbox:
 
     Not shared, not synced — purely a local record so `omarchy-relay agent
     inbox` can read what arrived without needing a live MQTT connection.
+
+    Incoming messages are persisted from inside RelayClient's on_message
+    callback, which paho runs on its own network thread — a different
+    thread than whichever one constructed this mailbox (the CLI's main
+    thread, or chat.py/gui.py's setup code). sqlite3 connections are
+    bound to one thread by default, so this opens with
+    check_same_thread=False and serializes every access through a lock
+    instead (same approach as PendingActions in mqttclient.py).
     """
 
     def __init__(self, path: Path = DB_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path)
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
 
     def add(
         self,
@@ -76,13 +87,14 @@ class AgentMailbox:
     ) -> bool:
         """Returns True if this was a new message (False if msg_id was
         already recorded — an MQTT redelivery, or a duplicate send)."""
-        cur = self._conn.execute(
-            "INSERT OR IGNORE INTO agent_messages (id, network, ts, direction, peer_device_id, peer_nick, text) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (msg_id, network, ts, direction, peer_device_id, peer_nick, text),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO agent_messages (id, network, ts, direction, peer_device_id, peer_nick, text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, network, ts, direction, peer_device_id, peer_nick, text),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def list(self, network: str, unread_only: bool = False, limit: Optional[int] = None) -> list[dict]:
         """Oldest-first."""
@@ -94,7 +106,8 @@ class AgentMailbox:
         if limit:
             query += " LIMIT ?"
             params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
         return [
             {
                 "id": r[0],
@@ -110,14 +123,16 @@ class AgentMailbox:
 
     def mark_read(self, network: str, msg_id: Optional[str] = None) -> None:
         """Mark one message read, or every incoming message if msg_id is None."""
-        if msg_id:
-            self._conn.execute("UPDATE agent_messages SET read = 1 WHERE network = ? AND id = ?", (network, msg_id))
-        else:
-            self._conn.execute("UPDATE agent_messages SET read = 1 WHERE network = ? AND direction = 'in'", (network,))
-        self._conn.commit()
+        with self._lock:
+            if msg_id:
+                self._conn.execute("UPDATE agent_messages SET read = 1 WHERE network = ? AND id = ?", (network, msg_id))
+            else:
+                self._conn.execute("UPDATE agent_messages SET read = 1 WHERE network = ? AND direction = 'in'", (network,))
+            self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 class AgentMessageHandler:

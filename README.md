@@ -368,6 +368,17 @@ omarchy-relay agent inbox --unread     # just what's new
 
 Inside `chat`: `/agent <nick> <text>`.
 
+**How you're alerted:** whichever of `daemon`, `chat`, or `gui` is running
+and connected pops the same desktop notification (`notify-send`) and quiet
+ding it already uses for DMs the moment an agent message arrives — that's
+the whole mechanism, nothing exotic. There's no separate always-on process
+just for this. A Claude Code session isn't paged directly (it isn't
+listening for a signal of its own); it finds out by running
+`omarchy-relay agent inbox` when it checks in, same as a human glancing at
+the notification and then opening the chat window. Check-ins are pull, by
+design — see the skill's guidance on doing this "as needed" rather than
+polling in a tight loop.
+
 Like DMs, delivery is **live-only and best-effort** — a message sent while
 the target has nothing running (`daemon`, `chat`, or `gui`) is simply not
 received; there's no store-and-forward. The local inbox (same SQLite file

@@ -94,7 +94,15 @@ def _build_client(cfg: Config, peers: PeerDirectory, print_line) -> RelayClient:
     action_handler = RemoteActionHandler(cfg, on_handled=on_action_handled)
 
     def on_agent_received(obj):
-        print_line(f"* [agent] {obj.get('nick', obj.get('from', '?'))}: {obj.get('text', '')}")
+        nick = obj.get("nick", obj.get("from", "?"))
+        text = obj.get("text", "")
+        print_line(f"* [agent] {nick}: {text}")
+        # Nothing else pages a running Claude session — this desktop
+        # notification/ding, same as DMs get, is the alert. A session
+        # (or the human at the keyboard) checks `omarchy-relay agent
+        # inbox` in response; nothing here executes the message content.
+        _notify(f"Agent message from {nick}", text)
+        _ding()
 
     mailbox = AgentMailbox()
     agent_handler = AgentMessageHandler(cfg, mailbox, on_received=on_agent_received)

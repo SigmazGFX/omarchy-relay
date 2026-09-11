@@ -1004,8 +1004,11 @@ class RelayWindow(Adw.ApplicationWindow):
         # command takes. Only the on_handled callback above (which does
         # touch a widget) needs the main-loop marshalling.
         self.client.on_action_request = lambda obj: self.action_handler.handle_request(self.client, obj)
-        # Same reasoning: handle_message only does sqlite writes (its own
-        # on_received callback is separately wrapped in _threaded above).
+        # Not wrapped in _threaded either: handle_message doesn't touch GTK
+        # directly — AgentMailbox is its own thread-safe (locked) sqlite
+        # wrapper, safe to call straight from paho's network thread. Its
+        # on_received callback is separately wrapped in _threaded above,
+        # since that one does touch a widget.
         self.client.on_agent_message = self.agent_handler.handle_message
         self.peers.on_removed = self._threaded(self._handle_peer_removed)
 
@@ -1573,6 +1576,8 @@ class RelayWindow(Adw.ApplicationWindow):
     def _on_agent_received(self, obj: dict) -> None:
         nick = obj.get("nick", obj.get("from", "?"))
         self._append_system(f"agent message from {nick} (see: omarchy-relay agent inbox)")
+        _notify(f"Agent message from {nick}", obj.get("text", ""))
+        _ding()
 
     def _handle_typing(self, obj: dict) -> None:
         device_id = obj.get("from")

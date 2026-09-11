@@ -46,6 +46,16 @@ omarchy-relay agent send <peer> "<text>"     # send a message (nickname or devic
 omarchy-relay agent trust list               # see who this machine currently trusts
 ```
 
+**How you find out something arrived:** there's no separate signal to a
+Claude Code session — whichever of `daemon`/`chat`/`gui` is running on that
+machine pops a desktop notification (and a sound) the instant a message
+lands, exactly like it already does for DMs. That notification is for a
+human, or for you to notice if you're the one watching that terminal. This
+is pull, not push: you find out by running `agent inbox` when you check
+in, not by being woken up. Don't build a tight polling loop around this —
+check in at natural points (session start, before/after a handoff, when
+asked) as the "check-ins as needed" framing above intends.
+
 Delivery is **live-only, best-effort** — like DMs, there's no store-and-forward.
 A message only arrives if the target peer currently has `daemon`, `chat`, or
 `gui` running and connected. If you need to reach someone and `agent send`
