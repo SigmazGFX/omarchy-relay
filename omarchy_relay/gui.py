@@ -9,7 +9,9 @@ update is marshalled onto GTK's main loop via GLib.idle_add.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
+import random
 import re
 import tempfile
 import threading
@@ -27,7 +29,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from . import network_share
+from . import history, network_share
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
@@ -90,6 +92,10 @@ _BASE_CSS = """
 }
 .bubble .emoji-only {
   font-size: 2.4em;
+}
+
+.sparkle-particle {
+  font-size: 1.6em;
 }
 
 .reactions-row {
@@ -296,6 +302,15 @@ _EMOJI_ONLY_RE = re.compile(
 
 _QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
 
+# A magic word: any message containing it (case-insensitive) sets off a
+# pixie-dust burst on every client that renders it — sender included, via
+# the broadcast echo.
+_SPARKLE_TRIGGER = "/sparkels"
+_SPARKLE_GLYPHS = ["✨", "💫", "⭐", "🌟"]
+_SPARKLE_COUNT = 28
+_SPARKLE_DURATION_MS = 5000
+_SPARKLE_STEP_MS = 50
+
 
 def _is_emoji_only(text: str, max_len: int = 12) -> bool:
     """A short WhatsApp/iMessage-style check: render standalone emoji (with
@@ -332,6 +347,7 @@ class RelayWindow(Adw.ApplicationWindow):
         self._message_meta: dict[str, dict] = {}  # msg_id -> {"is_dm", "peer_device_id"}
         self._reaction_slots: dict[str, Gtk.Box] = {}  # msg_id -> its reaction-pills row
         self._reactions: dict[str, dict[str, dict[str, str]]] = {}  # msg_id -> emoji -> device_id -> nick
+        self._sparkle_active = False
 
         self._install_theme()
 
@@ -344,9 +360,16 @@ class RelayWindow(Adw.ApplicationWindow):
         self.add_breakpoint(narrow)
 
         self.toast_overlay = Adw.ToastOverlay(child=split)
-        self.set_content(self.toast_overlay)
+        # Outermost layer, above toasts/sidebar/composer, so a /sparkels
+        # burst can cover the whole window without a widget hierarchy of
+        # its own to keep updated — particles just get added/removed here.
+        self.sparkle_overlay = Gtk.Overlay(child=self.toast_overlay)
+        self.set_content(self.sparkle_overlay)
         self.set_focus(self.entry)
         self._update_status()
+
+        self.history = history.HistoryStore()
+        self._load_history()
 
         self._wire_client_callbacks()
 
@@ -642,6 +665,7 @@ class RelayWindow(Adw.ApplicationWindow):
         is_mine: bool = False,
         is_dm: bool = False,
         dm_peer_device_id: Optional[str] = None,
+        is_history: bool = False,
     ) -> None:
         body = Gtk.Label(
             label=text,
@@ -665,6 +689,8 @@ class RelayWindow(Adw.ApplicationWindow):
         self._append_bubble(
             bubble, nick=nick, ts=ts, is_mine=is_mine, is_dm=is_dm, msg_id=msg_id, dm_peer_device_id=dm_peer_device_id
         )
+        if not is_history and _SPARKLE_TRIGGER in text.lower():
+            self._play_sparkles()
 
     def _append_system(self, text: str) -> None:
         label = Gtk.Label(
@@ -775,6 +801,7 @@ class RelayWindow(Adw.ApplicationWindow):
             return
         is_mine = obj.get("from") == self.cfg.device_id
         self._append_text(obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_mine=is_mine)
+        self._remember(obj, is_dm=False, peer_device_id=None)
         # Broadcasts echo back to the sender too (we're subscribed to our
         # own publish topic) — don't notify ourselves for our own messages.
         if not is_mine:
@@ -788,8 +815,37 @@ class RelayWindow(Adw.ApplicationWindow):
         self._append_text(
             obj["nick"], obj["ts"], obj["text"], msg_id=obj.get("id"), is_dm=True, dm_peer_device_id=obj.get("from")
         )
+        self._remember(obj, is_dm=True, peer_device_id=obj.get("from"))
         _notify(f"DM from {obj['nick']}", obj["text"])
         _ding()
+
+    def _remember(self, obj: dict, *, is_dm: bool, peer_device_id: Optional[str]) -> None:
+        if not obj.get("id"):
+            return  # nothing stable to key on — skip rather than store an unfindable row
+        self.history.add_message(
+            self.cfg.network_name, obj["id"], obj["ts"], obj["from"], obj["nick"], obj["text"], is_dm, peer_device_id
+        )
+        self.history.prune(self.cfg.network_name, self.cfg.history_retain_count, self.cfg.history_retain_days)
+
+    def _load_history(self) -> None:
+        limit = self.cfg.history_retain_count or None
+        messages = self.history.recent_messages(self.cfg.network_name, limit=limit)
+        if not messages:
+            return
+        for m in messages:
+            is_mine = not m["is_dm"] and m["from_device"] == self.cfg.device_id
+            self._append_text(
+                m["nick"],
+                m["ts"],
+                m["text"],
+                msg_id=m["id"],
+                is_mine=is_mine,
+                is_dm=m["is_dm"],
+                dm_peer_device_id=m["peer_device_id"],
+                is_history=True,
+            )
+        count = len(messages)
+        self._append_system(f"{count} earlier message{'s' if count != 1 else ''} loaded")
 
     def _handle_reaction(self, obj: dict) -> None:
         target_id, emoji, device_id = obj.get("target_id"), obj.get("emoji"), obj.get("from")
@@ -904,6 +960,57 @@ class RelayWindow(Adw.ApplicationWindow):
             )
             pill.connect("clicked", lambda _b, e=emoji: self._toggle_reaction(msg_id, e))
             box.append(pill)
+
+    def _play_sparkles(self) -> None:
+        if self._sparkle_active:
+            return  # a burst is already running — don't stack another on top
+        self._sparkle_active = True
+
+        width = max(self.get_width(), 400)
+        height = max(self.get_height(), 300)
+        particles = []
+        for _ in range(_SPARKLE_COUNT):
+            label = Gtk.Label(
+                label=random.choice(_SPARKLE_GLYPHS),
+                halign=Gtk.Align.START,
+                valign=Gtk.Align.START,
+                can_target=False,
+                css_classes=["sparkle-particle"],
+                opacity=0.0,
+            )
+            self.sparkle_overlay.add_overlay(label)
+            particles.append(
+                {
+                    "widget": label,
+                    "x": random.uniform(0, width),
+                    "y": random.uniform(-height * 0.2, height * 0.9),
+                    "vy": random.uniform(20, 55) * (_SPARKLE_STEP_MS / 1000),
+                    "drift": random.uniform(-1.5, 1.5),
+                    "phase": random.uniform(0, 2 * math.pi),
+                }
+            )
+
+        started = time.time()
+
+        def step() -> bool:
+            elapsed_ms = (time.time() - started) * 1000
+            fade_in = min(elapsed_ms / 300, 1.0)
+            fade_out = 1.0 - max(0.0, (elapsed_ms - (_SPARKLE_DURATION_MS - 700)) / 700)
+            for p in particles:
+                p["x"] += p["drift"]
+                p["y"] += p["vy"]
+                p["widget"].set_margin_start(int(p["x"]))
+                p["widget"].set_margin_top(int(p["y"]))
+                twinkle = 0.5 + 0.5 * math.sin(elapsed_ms / 120 + p["phase"])
+                p["widget"].set_opacity(max(0.0, twinkle * fade_in * fade_out))
+            if elapsed_ms >= _SPARKLE_DURATION_MS:
+                for p in particles:
+                    self.sparkle_overlay.remove_overlay(p["widget"])
+                self._sparkle_active = False
+                return False
+            return True
+
+        GLib.timeout_add(_SPARKLE_STEP_MS, step)
 
     def _on_emoji_picked(self, _chooser: Gtk.EmojiChooser, emoji: str) -> None:
         pos = self.entry.get_position()
@@ -1040,6 +1147,16 @@ class RelayWindow(Adw.ApplicationWindow):
         )
         presence_row.set_active(self.cfg.show_presence)
         chat_group.add(presence_row)
+        history_count_row = Adw.SpinRow.new_with_range(0, 10000, 10)
+        history_count_row.set_title("Keep last N messages")
+        history_count_row.set_subtitle("Shown again on startup — 0 = don't limit by count")
+        history_count_row.set_value(self.cfg.history_retain_count)
+        chat_group.add(history_count_row)
+        history_days_row = Adw.SpinRow.new_with_range(0, 3650, 1)
+        history_days_row.set_title("Keep messages for N days")
+        history_days_row.set_subtitle("0 = don't limit by age")
+        history_days_row.set_value(self.cfg.history_retain_days)
+        chat_group.add(history_days_row)
         page.add(chat_group)
 
         toasts = Adw.ToastOverlay(child=page)
@@ -1074,10 +1191,13 @@ class RelayWindow(Adw.ApplicationWindow):
                 broker_username=username_row.get_text().strip(),
                 broker_password=password_row.get_text(),
                 show_presence=presence_row.get_active(),
+                history_retain_count=int(history_count_row.get_value()),
+                history_retain_days=history_days_row.get_value(),
             )
             if not new_cfg.broker_host or not new_cfg.network_name or not new_cfg.passphrase:
                 toasts.add_toast(Adw.Toast(title="Host, network name, and passphrase are required"))
                 return
+            self.history.prune(new_cfg.network_name, new_cfg.history_retain_count, new_cfg.history_retain_days)
             new_cfg.save()
             dialog.close()
             needs_reconnect = any(
@@ -1125,7 +1245,10 @@ class RelayWindow(Adw.ApplicationWindow):
                     return
                 toasts.add_toast(Adw.Toast(title=f"Exported to {path.name}"))
 
-            file_dialog.save(dialog, None, on_save_finish)
+            # Gtk.FileDialog needs the actual top-level Gtk.Window as parent —
+            # `dialog` here is the Adw.Dialog sheet, not a window, so it must
+            # be `self` (RelayWindow) or the portal call fails silently.
+            file_dialog.save(self, None, on_save_finish)
 
         def on_import(_btn) -> None:
             file_dialog = Gtk.FileDialog()
@@ -1152,7 +1275,7 @@ class RelayWindow(Adw.ApplicationWindow):
                 password_row.set_text(imported["broker_password"])
                 toasts.add_toast(Adw.Toast(title="Imported — review below, then Save"))
 
-            file_dialog.open(dialog, None, on_open_finish)
+            file_dialog.open(self, None, on_open_finish)
 
         export_btn.connect("clicked", on_export)
         import_btn.connect("clicked", on_import)

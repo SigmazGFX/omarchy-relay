@@ -9,6 +9,7 @@ from pathlib import Path
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy-relay"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "omarchy-relay"
 
 
 def default_device_id() -> str:
@@ -38,6 +39,11 @@ class Config:
     # Display preference: show "X is online"/"X went offline" lines in the
     # chat log. Peer list/sidebar accuracy is unaffected either way.
     show_presence: bool = True
+    # Local message history (see history.py): shown on startup, before any
+    # live traffic arrives. Either cap can be 0 for "unlimited" on that
+    # dimension; both apply together when both are set.
+    history_retain_count: int = 200
+    history_retain_days: float = 0
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
@@ -68,6 +74,8 @@ class Config:
             remote_actions_peers=dict(remote_actions.get("peers", {})),
             remote_actions_commands=dict(remote_actions.get("commands", {})),
             show_presence=ui.get("show_presence", True),
+            history_retain_count=ui.get("history_retain_count", 200),
+            history_retain_days=ui.get("history_retain_days", 0),
         )
         if not cfg.broker_host:
             raise ValueError(
@@ -121,6 +129,8 @@ enabled = {"true" if self.remote_actions_enabled else "false"}
 
 [ui]
 show_presence = {"true" if self.show_presence else "false"}
+history_retain_count = {self.history_retain_count}
+history_retain_days = {self.history_retain_days}
 """
 
 
