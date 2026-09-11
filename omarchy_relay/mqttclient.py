@@ -92,6 +92,7 @@ class RelayClient:
         self.on_screen_state: Optional[Callable[[str, Optional[dict]], None]] = None
         self.on_screen_watch: Optional[Callable[[dict], None]] = None
         self.on_screen_frame: Optional[Callable[[dict, bytes], None]] = None
+        self.on_screen_audio: Optional[Callable[[dict, bytes], None]] = None
         self.on_bad_message: Optional[Callable[[str, Exception], None]] = None
 
         # Remote-action request/result matching (see remote_actions.py).
@@ -103,6 +104,7 @@ class RelayClient:
         self.screen_state_topic = f"{self.ns}/screen/{cfg.device_id}"
         self.screen_state: Optional[dict] = None
         self._watched_shares: set[str] = set()
+        self._voice_shares: set[str] = set()  # shares whose voice room this client is in (see voice.py)
 
         self.connected = threading.Event()
 
@@ -172,6 +174,22 @@ class RelayClient:
             f"{self.ns}/screen-frame/{share_id}", payload=self.cipher.encrypt(plaintext), qos=0
         )
 
+    def send_screen_audio(self, share_id: str, header: dict, packet: bytes) -> None:
+        """Same framing as screen frames: a JSON header line, then the raw
+        Opus packet. QoS 0 — a late packet is useless anyway."""
+        plaintext = json.dumps(header).encode("utf-8") + b"\n" + packet
+        self._client.publish(f"{self.ns}/screen-audio/{share_id}", payload=self.cipher.encrypt(plaintext), qos=0)
+
+    def join_screen_audio(self, share_id: str) -> None:
+        self._voice_shares.add(share_id)
+        if self.connected.is_set():
+            self._client.subscribe(f"{self.ns}/screen-audio/{share_id}", 0)
+
+    def leave_screen_audio(self, share_id: str) -> None:
+        self._voice_shares.discard(share_id)
+        if self.connected.is_set():
+            self._client.unsubscribe(f"{self.ns}/screen-audio/{share_id}")
+
     def watch_screen(self, share_id: str) -> None:
         self._watched_shares.add(share_id)
         if self.connected.is_set():
@@ -205,6 +223,7 @@ class RelayClient:
                 (f"{self.ns}/screen-watch/{self.cfg.device_id}", 0),
             ]
             + [(f"{self.ns}/screen-frame/{share_id}", 0) for share_id in self._watched_shares]
+            + [(f"{self.ns}/screen-audio/{share_id}", 0) for share_id in self._voice_shares]
         )
         self._publish_presence()
         # Republishing (or clearing) on every connect also wipes a stale
@@ -234,7 +253,9 @@ class RelayClient:
             elif topic == f"{self.ns}/screen-watch/{self.cfg.device_id}":
                 self._dispatch_encrypted(msg.payload, self.on_screen_watch)
             elif len(parts) >= 2 and parts[-2] == "screen-frame":
-                self._handle_screen_frame(msg.payload)
+                self._dispatch_framed(msg.payload, self.on_screen_frame)
+            elif len(parts) >= 2 and parts[-2] == "screen-audio":
+                self._dispatch_framed(msg.payload, self.on_screen_audio)
             elif len(parts) >= 2 and parts[-2] == "presence":
                 self._handle_presence(parts[-1], msg.payload)
             elif len(parts) >= 2 and parts[-1] == "meta" and "file" in parts:
@@ -268,11 +289,12 @@ class RelayClient:
             return
         self.on_screen_state(device_id, json.loads(self.cipher.decrypt(payload).decode("utf-8")))
 
-    def _handle_screen_frame(self, payload: bytes) -> None:
-        if self.on_screen_frame is None:
+    def _dispatch_framed(self, payload: bytes, handler) -> None:
+        """A JSON header line followed by raw bytes (screen frames, voice)."""
+        if handler is None:
             return
-        header, _newline, chunk = self.cipher.decrypt(payload).partition(b"\n")
-        self.on_screen_frame(json.loads(header.decode("utf-8")), chunk)
+        header, _newline, data = self.cipher.decrypt(payload).partition(b"\n")
+        handler(json.loads(header.decode("utf-8")), data)
 
     def _dispatch_encrypted(self, payload: bytes, handler) -> None:
         if handler is None:

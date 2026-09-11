@@ -207,9 +207,9 @@ show in a bubble at the bottom of the chat (with their name) and under
 their name in the sidebar, and the chat header says so ("Alice is
 typing…"). `chat` and `chat --tui` neither send nor show it.
 
-**Coffee**: `/coffee` buys everyone a virtual cup of coffee, `/coffee
-<nickname> [note]` sends one to one person, and every other name in the
-sidebar has a ☕ button. It lands as a coffee card (reactions work on it
+**Coffee**: `/coffee` buys everyone a virtual cup of coffee, and `/coffee
+<nickname> [note]` sends one to one person — the command is the only way
+to send one. It lands as a coffee card (reactions work on it
 like any message) with a steaming cup popping up over the window, and is
 kept in message history. Older clients, `chat`, and `chat --tui` show it as
 an ordinary message ("☕ sent you a cup of coffee").
@@ -271,6 +271,26 @@ shows **LIVE** and how many people are watching; the same button stops it.
   window is open. Viewers heartbeat every 3 seconds and the sharer stops
   sending 10 seconds after the last one — an unwatched share costs a single
   retained message.
+- **Voice:** everyone in a share can talk. The microphone button next to
+  **LIVE** (while sharing) or in a viewer window's header unmutes you;
+  microphones always start muted and are only captured while unmuted. A
+  viewer window's speaker button mutes everyone else, and its subtitle
+  shows who's talking. Voice is Opus at 24 kbps in 40 ms packets,
+  encrypted, QoS 0 — about 9 KB/s of broker traffic per person talking,
+  a quarter of that during silence — played through a small jitter
+  buffer, so expect a few
+  hundred milliseconds of delay through a remote broker. A sharer's audio
+  only goes out while someone is watching.
+- **Echo cancellation:** while your microphone is unmuted, the app loads
+  PipeWire's echo-cancel module (WebRTC's canceller) privately through
+  `pw-cli`: your microphone is captured through it and everyone else's
+  voices play through it, so what comes out of your speakers is removed
+  from what your microphone sends. Muted, there's nothing to cancel, so
+  it's unloaded and voices play straight to your speakers — it never holds
+  the microphone open while you're muted. Your default devices and audio
+  setup aren't touched, and the module also goes away if the app exits
+  uncleanly. If it can't be loaded, voice still works and the app tells
+  you to use headphones.
 - **Format:** JPEG stills scaled to fit 1280px wide, at most 3 a second,
   encrypted like everything else — roughly 50–150 KB a frame, depending on
   what's on screen. Nothing beyond gst-plugins-base and gdk-pixbuf is
@@ -379,7 +399,8 @@ nothing here equivalent to a remote shell.
 ```
 omarchy_relay/     the package (config, crypto, mqttclient, transfer,
                     presence, remote_actions, chat, cli, tui, gui, audio,
-                    history, network_share, screenshare, release_notes)
+                    history, network_share, screenshare, voice,
+                    release_notes)
 install.sh          installs deps (pacman) + the omarchy-relay launcher
 uninstall.sh
 scripts/            one-shot quickstart installers (see Quickstart above)

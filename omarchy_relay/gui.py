@@ -34,7 +34,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from . import audio, history, network_share, release_notes, screenshare
+from . import audio, history, network_share, release_notes, screenshare, voice
 from .chat import _ding, _notify
 from .config import Config
 from .mqttclient import RelayClient
@@ -248,11 +248,6 @@ button.send-button {
    the window when one is sent or received. */
 .coffee-card .coffee-cup {
   font-size: 2.4em;
-}
-button.coffee-button {
-  min-width: 28px;
-  min-height: 28px;
-  padding: 0;
 }
 /* Every keyframe spells out the same translateY() scale() pair: GTK falls
    back to matrix interpolation between mismatched transform lists, and a
@@ -521,6 +516,11 @@ def _typing_dots(small: bool = False) -> Gtk.Box:
     return box
 
 
+def _sync_mic_button(button: Gtk.ToggleButton, on: bool) -> None:
+    button.set_icon_name("audio-input-microphone-symbolic" if on else "microphone-sensitivity-muted-symbolic")
+    button.set_tooltip_text("Mute your microphone" if on else "Unmute your microphone")
+
+
 def _fmt_release_date(date: str) -> str:
     try:
         return time.strftime("%B %-d, %Y", time.strptime(date, "%Y-%m-%d"))
@@ -578,6 +578,8 @@ class RelayWindow(Adw.ApplicationWindow):
         self._coffee_active = False
         self._sharer: Optional[screenshare.ScreenSharer] = None
         self._share_watchers: list[str] = []  # nicks currently watching our share
+        self._share_voice: Optional[voice.VoiceSession] = None  # our share's voice room
+        self._share_talkers: list[str] = []  # nicks talking in our share's voice room right now
         self._shares: dict[str, dict] = {}  # device_id -> a peer's live share: share_id, nick, its chat card's widgets
         self._viewers: dict[str, ScreenViewerWindow] = {}  # share_id -> open viewer window
         self._hyprland_lock = threading.Lock()
@@ -672,7 +674,11 @@ class RelayWindow(Adw.ApplicationWindow):
         self.share_btn = Gtk.Button(icon_name="video-display-symbolic", tooltip_text="Share your screen")
         self.share_btn.connect("clicked", self._on_share_clicked)
         header.pack_end(self.share_btn)
-        self.share_badge = Gtk.Label(label="LIVE", visible=False, valign=Gtk.Align.CENTER, css_classes=["live-badge"])
+        self.share_mic_btn = Gtk.ToggleButton(visible=False)
+        _sync_mic_button(self.share_mic_btn, False)
+        self.share_mic_btn.connect("toggled", self._on_share_mic_toggled)
+        header.pack_end(self.share_mic_btn)
+        self.share_badge =Gtk.Label(label="LIVE", visible=False, valign=Gtk.Align.CENTER, css_classes=["live-badge"])
         header.pack_end(self.share_badge)
 
         self.banner = Adw.Banner(title="Couldn't reach the broker", button_label="Settings")
@@ -851,6 +857,7 @@ class RelayWindow(Adw.ApplicationWindow):
         # times a second — they stay on paho's thread (see the methods).
         self.client.on_screen_watch = self._on_screen_watch
         self.client.on_screen_frame = self._on_screen_frame
+        self.client.on_screen_audio = self._on_screen_audio
 
     # -- thread marshalling ------------------------------------------------
 
@@ -1181,15 +1188,6 @@ class RelayWindow(Adw.ApplicationWindow):
                 )
                 watch_btn.connect("clicked", lambda _b, d=device_id: self._open_viewer(d))
                 box.append(watch_btn)
-            if not is_me:
-                coffee_btn = Gtk.Button(
-                    label="☕",
-                    tooltip_text=f"Send {nick} a coffee",
-                    valign=Gtk.Align.CENTER,
-                    css_classes=["flat", "circular", "coffee-button"],
-                )
-                coffee_btn.connect("clicked", lambda _b, d=device_id: self._send_coffee(d))
-                box.append(coffee_btn)
             self.peer_list.append(Gtk.ListBoxRow(child=box, activatable=False, selectable=False))
         self._update_status()
 
@@ -2065,6 +2063,16 @@ class RelayWindow(Adw.ApplicationWindow):
 
     def _on_share_started(self) -> None:
         self._append_system("You're sharing your screen — nothing is sent until someone opens it")
+        sharer = self._sharer
+        self._share_voice = voice.VoiceSession(
+            self.client,
+            self.cfg,
+            sharer.share_id,
+            on_talking_changed=self._on_share_talking,
+            on_error=self._on_share_voice_error,
+            on_warning=lambda message: self.toast_overlay.add_toast(Adw.Toast(title=message)),
+            should_send=lambda: bool(sharer.watcher_nicks()),  # nobody to talk to until someone watches
+        )
         self._update_share_ui()
 
     def _on_share_watchers(self, nicks: list[str]) -> None:
@@ -2080,6 +2088,11 @@ class RelayWindow(Adw.ApplicationWindow):
     def _on_share_ended(self, reason: str) -> None:
         self._sharer = None
         self._share_watchers = []
+        if self._share_voice is not None:
+            self._share_voice.close()
+            self._share_voice = None
+        self._share_talkers = []
+        self.share_mic_btn.set_active(False)
         if reason:
             self._append_system(reason)
         self._update_share_ui()
@@ -2097,8 +2110,14 @@ class RelayWindow(Adw.ApplicationWindow):
                 "Waiting for you to pick a screen — click to cancel" if sharer is not None else "Share your screen"
             )
         count = len(self._share_watchers)
+        badge = ["LIVE"]
+        if count:
+            badge.append(f"{count} watching")
+        if self._share_talkers:
+            badge.append(f"{', '.join(self._share_talkers)} talking")
         self.share_badge.set_visible(live)
-        self.share_badge.set_label(f"LIVE · {count} watching" if count else "LIVE")
+        self.share_badge.set_label(" · ".join(badge))
+        self.share_mic_btn.set_visible(live)
         self.share_badge.set_tooltip_text(", ".join(self._share_watchers) or "Nobody is watching yet")
 
     def _on_screen_watch(self, obj: dict) -> None:
@@ -2110,6 +2129,30 @@ class RelayWindow(Adw.ApplicationWindow):
         viewer = self._viewers.get(header.get("share_id"))
         if viewer is not None:
             viewer.add_chunk(header, chunk)
+
+    def _on_screen_audio(self, header: dict, packet: bytes) -> None:
+        # paho's thread, 25 packets a second per talker: straight to the room.
+        share_id = header.get("share_id")
+        session = self._share_voice
+        if session is not None and session.share_id == share_id:
+            session.handle_packet(header, packet)
+            return
+        viewer = self._viewers.get(share_id)
+        if viewer is not None:
+            viewer.voice.handle_packet(header, packet)
+
+    def _on_share_mic_toggled(self, button: Gtk.ToggleButton) -> None:
+        if self._share_voice is not None:
+            self._share_voice.set_mic(button.get_active())  # a failure comes back through _on_share_voice_error
+        _sync_mic_button(button, button.get_active())
+
+    def _on_share_talking(self, nicks: list[str]) -> None:
+        self._share_talkers = nicks
+        self._update_share_ui()
+
+    def _on_share_voice_error(self, message: str) -> None:
+        self.toast_overlay.add_toast(Adw.Toast(title=f"Microphone stopped: {message}"))
+        self.share_mic_btn.set_active(False)
 
     def _handle_screen_state(self, device_id: str, data: Optional[dict]) -> None:
         if device_id == self.cfg.device_id:
@@ -2688,6 +2731,19 @@ class ScreenViewerWindow(Adw.Window):
 
         self.title_widget = Adw.WindowTitle(title=self.get_title(), subtitle="Connecting…")
         header = Adw.HeaderBar(title_widget=self.title_widget)
+        # Voice: everyone in this share can talk. The mic starts muted; the
+        # others are heard unless the speaker button is switched off.
+        self.mic_btn = Gtk.ToggleButton()
+        _sync_mic_button(self.mic_btn, False)
+        self.mic_btn.connect("toggled", self._on_mic_toggled)
+        self.listen_btn = Gtk.ToggleButton(
+            active=True, icon_name="audio-volume-high-symbolic", tooltip_text="Mute everyone in this share"
+        )
+        self.listen_btn.connect("toggled", self._on_listen_toggled)
+        header.pack_end(self.mic_btn)
+        header.pack_end(self.listen_btn)
+        self._live = False
+        self._talkers: list[str] = []
 
         waiting = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
         waiting.append(Adw.Spinner(width_request=32, height_request=32))
@@ -2703,12 +2759,21 @@ class ScreenViewerWindow(Adw.Window):
         self.stack.add_named(self.picture, "live")
         self.stack.add_named(ended, "ended")
 
-        view = Adw.ToolbarView(content=self.stack)
+        self.toasts = Adw.ToastOverlay(child=self.stack)
+        view = Adw.ToolbarView(content=self.toasts)
         view.add_top_bar(header)
         self.set_content(view)
         self.connect("close-request", self._on_close_request)
 
         relay.client.watch_screen(self.share_id)
+        self.voice = voice.VoiceSession(
+            relay.client,
+            relay.cfg,
+            self.share_id,
+            on_talking_changed=self._on_talking_changed,
+            on_error=self._on_voice_error,
+            on_warning=lambda message: self.toasts.add_toast(Adw.Toast(title=message)),
+        )
         self._send_heartbeat()
         self._heartbeat_id = GLib.timeout_add_seconds(screenshare.WATCH_HEARTBEAT_SECONDS, self._send_heartbeat)
 
@@ -2737,8 +2802,34 @@ class ScreenViewerWindow(Adw.Window):
             self.picture.set_paintable(texture)
             if self.stack.get_visible_child_name() != "live":
                 self.stack.set_visible_child_name("live")
-                self.title_widget.set_subtitle("Live")
+                self._live = True
+                self._update_subtitle()
         return False
+
+    def _update_subtitle(self) -> None:
+        parts = ["Live" if self._live else "Connecting…"]
+        if self._talkers:
+            parts.append(f"{', '.join(self._talkers)} talking")
+        self.title_widget.set_subtitle(" · ".join(parts))
+
+    def _on_talking_changed(self, nicks: list[str]) -> None:
+        self._talkers = nicks
+        if not self._stopped:
+            self._update_subtitle()
+
+    def _on_mic_toggled(self, button: Gtk.ToggleButton) -> None:
+        self.voice.set_mic(button.get_active())  # a failure comes back through _on_voice_error
+        _sync_mic_button(button, button.get_active())
+
+    def _on_listen_toggled(self, button: Gtk.ToggleButton) -> None:
+        on = button.get_active()
+        self.voice.set_listening(on)
+        button.set_icon_name("audio-volume-high-symbolic" if on else "audio-volume-muted-symbolic")
+        button.set_tooltip_text("Mute everyone in this share" if on else "Hear everyone in this share")
+
+    def _on_voice_error(self, message: str) -> None:
+        self.toasts.add_toast(Adw.Toast(title=f"Microphone stopped: {message}"))
+        self.mic_btn.set_active(False)
 
     def show_ended(self) -> None:
         self._stop()
@@ -2763,6 +2854,9 @@ class ScreenViewerWindow(Adw.Window):
         self._stopped = True
         GLib.source_remove(self._heartbeat_id)
         self.relay.client.unwatch_screen(self.share_id)
+        self.voice.close()
+        self.mic_btn.set_sensitive(False)
+        self.listen_btn.set_sensitive(False)
         if self.relay._viewers.get(self.share_id) is self:
             del self.relay._viewers[self.share_id]
 

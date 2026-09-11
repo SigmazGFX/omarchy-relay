@@ -19,6 +19,23 @@ class Release:
 
 RELEASES: tuple[Release, ...] = (
     Release(
+        version="0.3.0",
+        date="2026-09-11",
+        items=(
+            (
+                "Talk while screen sharing",
+                "Everyone in a screen share can talk: use the microphone button in the viewer window, or "
+                "next to LIVE while you share. Microphones start muted, and echo cancellation keeps the "
+                "others from hearing themselves through your speakers.",
+            ),
+            (
+                "Coffee by command only",
+                "The cup buttons next to names are gone. Send a coffee with /coffee <nickname> [note], or "
+                "/coffee for everyone.",
+            ),
+        ),
+    ),
+    Release(
         version="0.2.0",
         date="2026-09-11",
         items=(
